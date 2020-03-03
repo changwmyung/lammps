@@ -320,7 +320,7 @@ void FixPIMD::nhc_update_x()
 }
 
 /* ---------------------------------------------------------------------- */
-
+// CM
 void FixPIMD::nhc_update_v()
 {
   int n = atom->nlocal;
