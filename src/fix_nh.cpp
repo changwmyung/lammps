@@ -2270,6 +2270,8 @@ void FixNH::nh_omega_dot()
 
   for (int i = 0; i < 3; i++)
     if (p_flag[i]) {
+      //CM
+
       f_omega = (p_current[i]-p_hydro)*volume /
         (omega_mass[i] * nktv2p) + mtk_term1 / omega_mass[i];
       if (deviatoric_flag) f_omega -= fdev[i]/(omega_mass[i] * nktv2p);
