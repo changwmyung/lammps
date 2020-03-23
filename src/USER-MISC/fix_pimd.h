@@ -81,6 +81,9 @@ class FixPIMD : public Fix {
   void comm_init();
   void comm_exec(double **);
 
+  //CM communication for barostat
+  void comm_exec_barostat(double );
+
   /* normal-mode operations */
 
   double *lam, **M_x2xp, **M_xp2x, **M_f2fp, **M_fp2f;
@@ -116,6 +119,7 @@ class FixPIMD : public Fix {
   double p_current[6];
   double p_freq_max;               // maximum barostat frequency
   double omega[6],omega_dot[6];
+  double posexp[3];                // position update by omega_dot
   double omega_mass[6];
   double h0_inv[6];                // h_inv of reference (zero strain) box
   int deviatoric_flag;             // 0 if target stress tensor is hydrostatic 
@@ -157,19 +161,20 @@ class FixPIMD : public Fix {
 
   //barostat variables
   //this I need to be careful about. they used ** instead of *.
+  //CM: it is important to keep in mind that the thermostat variables are nchain*d*N*M !!!
   double *etap;                    // chain thermostat for barostat                
   double *etap_dot;
   double *etap_dotdot;                                                             
   double *etap_mass;  
 
   //thermostat variables
-  double *eta,*eta_dot;            // chain thermostat for particles
-  double *eta_dotdot;
-  double *eta_mass;
+  double **eta,**eta_dot;            // chain thermostat for particles
+  double **eta_dotdot;
+  double **eta_mass;
   double t_freq;
   double tdrag_factor;        // drag factor on particle thermostat
 
-  double compute_scalar();
+//  double compute_scalar();
   void compute_press_target();
   void couple();
   void nh_omega_dot();
@@ -183,6 +188,9 @@ class FixPIMD : public Fix {
   virtual void nve_x();            // may be overwritten by child classes
   virtual void remap();
   virtual void compute_temp_target();
+
+  //CM test function 
+  void remove_spring_force();
 
   class Compute *temperature,*pressure;
 
