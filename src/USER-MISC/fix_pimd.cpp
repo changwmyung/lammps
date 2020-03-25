@@ -1640,7 +1640,7 @@ void FixPIMD::compute_deviatoric()
    perform half-step barostat scaling of velocities
 -----------------------------------------------------------------------*/
 //CM
-//this scaling is only for centroid mode for reduced scheme [2].
+//this scaling is only for centroid mode for reduced scheme, Eq 3.7.2 [2].
 void FixPIMD::nh_v_press()
 {
   double factor[3];
@@ -1651,7 +1651,7 @@ void FixPIMD::nh_v_press()
 
   //CM
   //where is the W_{iso} term????
-  factor[0] = exp(-dt4*(omega_dot[0]+mtk_term2)/omega_mass[0]);
+  factor[0] = exp(-dt4*(omega_dot[0]+mtk_term2)/omega_mass[0]); // exp[-dt4*(omega_dot+1/N*omega_dot)/W]
   factor[1] = exp(-dt4*(omega_dot[1]+mtk_term2)/omega_mass[1]);
   factor[2] = exp(-dt4*(omega_dot[2]+mtk_term2)/omega_mass[2]);
 
@@ -1912,7 +1912,8 @@ void FixPIMD::nve_x()
    perform half-step update of chain thermostat variables for barostat
    scale barostat velocities
 ------------------------------------------------------------------------- */
-
+// CM
+// Need to revise the code. According to the [2].
 void FixPIMD::nhc_press_integrate()
 {
   int ich,i,pdof;
@@ -1970,7 +1971,9 @@ void FixPIMD::nhc_press_integrate()
 
   double ncfac = 1.0/nc_pchain;
   for (int iloop = 0; iloop < nc_pchain; iloop++) {
-
+    
+    //CM
+    //ich!=0
     for (ich = mpchain-1; ich > 0; ich--) {
       expfac = exp(-ncfac*dt8*etap_dot[ich+1]);
       etap_dot[ich] *= expfac;
@@ -1979,12 +1982,15 @@ void FixPIMD::nhc_press_integrate()
       etap_dot[ich] *= expfac;
     }
 
+    //CM
+    //ich=0
     expfac = exp(-ncfac*dt8*etap_dot[1]);
     etap_dot[0] *= expfac;
     etap_dot[0] += etap_dotdot[0] * ncfac*dt4;
     etap_dot[0] *= pdrag_factor;
     etap_dot[0] *= expfac;
 
+    //etap update
     for (ich = 0; ich < mpchain; ich++)
       etap[ich] += ncfac*dthalf*etap_dot[ich];
 
@@ -2085,6 +2091,7 @@ void FixPIMD::nhc_temp_integrate()
   //boltz * nhc_temp 
 
   // Update masses, to preserve initial freq, if flag set
+  //CM each degree of freedom is coupled!
   for(int ip=0; ip<nmax; ip++)
   {
     int iatm = ip/3;
