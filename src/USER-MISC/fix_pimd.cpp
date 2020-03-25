@@ -493,8 +493,9 @@ void FixPIMD::setup(int vflag)
 
   //CM
   //force is updated first 
-  post_force(vflag);  //previous post_force function
-  remove_spring_force();
+
+  //post_force(vflag);  //previous post_force function
+  //remove_spring_force();
 
   if(universe->me==0 && screen) fprintf(screen,"1. Setting up Path-Integral ...\n");
 
@@ -503,6 +504,7 @@ void FixPIMD::setup(int vflag)
 
   - It's important that the spring force terms is excluded from the pressure calculations.
 ------------------------------------------------------------------------- */
+
 
   t_current = temperature->compute_scalar();
   tdof = temperature->dof;
@@ -517,8 +519,10 @@ void FixPIMD::setup(int vflag)
     pressure->addstep(update->ntimestep+1);
   }
 
+  post_force(vflag);  //previous post_force function
+
   //CM 
-  spring_force();
+  //spring_force();
 
   // masses and initial forces on thermostat variables
   double t_target=nhc_temp;
@@ -598,7 +602,8 @@ void FixPIMD::initial_integrate(int /*vflag*/)
 //  CM measure the pressure & temperature again!
 
 //  For test purpose,
-    remove_spring_force();
+//    remove_spring_force();
+//    multiply_post_force();
 ////////
 
     if (pstat_flag) {
@@ -612,6 +617,11 @@ void FixPIMD::initial_integrate(int /*vflag*/)
       couple();
       pressure->addstep(update->ntimestep+1);
     }
+
+//  For test purpose,
+//    spring_force();
+//    divide_post_force();
+////////
   
     if (pstat_flag) {
       compute_press_target();
@@ -629,9 +639,6 @@ void FixPIMD::initial_integrate(int /*vflag*/)
       
     }
 
-//  For test purpose,
-    spring_force();
-////////
   
     nve_v();
   
@@ -678,7 +685,8 @@ void FixPIMD::final_integrate()
     // compute appropriately coupled elements of mvv_current
 
 //  For test purpose,
-    remove_spring_force();
+//    remove_spring_force();
+//    multiply_post_force();
 ////////
 
     if (pstat_flag) {
@@ -692,7 +700,8 @@ void FixPIMD::final_integrate()
     }
 
 //  For test purpose,
-    spring_force();
+//    spring_force();
+//    divide_post_force();
 ////////
 
     //CM
@@ -738,6 +747,18 @@ void FixPIMD::post_force(int /*flag*/)
 
     nmpimd_transform(buf_beads, atom->f, M_f2fp[universe->iworld]);
   }
+}
+
+//CM
+//For pressure virial calculations
+void FixPIMD::multiply_post_force()
+{
+  for(int i=0; i<atom->nlocal; i++) for(int j=0; j<3; j++) atom->f[i][j] *= np;
+}
+
+void FixPIMD::divide_post_force()
+{
+  for(int i=0; i<atom->nlocal; i++) for(int j=0; j<3; j++) atom->f[i][j] /= np;
 }
 
 /* ----------------------------------------------------------------------
@@ -1130,9 +1151,10 @@ void FixPIMD::comm_init()
 
       mode_index[i]=(universe->iworld+i+1)%(universe->nworlds);
 
-      if(universe->me==0)
-        printf("comm->nprocs / plan_send / plan_recv / mode_index: %d / %d / %d / %d \n", comm->nprocs, plan_send[i], plan_recv[i], mode_index[i]);
-        printf("universe->iworld / universe->nworlds: %d / %d \n", universe->iworld, universe->nworlds);
+//CM
+//      if(universe->me==0)
+//        printf("comm->nprocs / plan_send / plan_recv / mode_index: %d / %d / %d / %d \n", comm->nprocs, plan_send[i], plan_recv[i], mode_index[i]);
+//        printf("universe->iworld / universe->nworlds: %d / %d \n", universe->iworld, universe->nworlds);
     }
 
     x_next = (universe->iworld+1+universe->nworlds)%(universe->nworlds);
@@ -1460,12 +1482,18 @@ void FixPIMD::compute_press_target()
 void FixPIMD::couple()
 {
   double *tensor = pressure->vector;
+  
+  //CM
+  compute_pressure_scalar();
 
   if (pstyle == ISO)
+    //CM
     p_current[0] = p_current[1] = p_current[2] = pressure->scalar;
+    //p_current[0] = p_current[1] = p_current[2] = 400.0;
   else if (pcouple == XYZ) {
     double ave = 1.0/3.0 * (tensor[0] + tensor[1] + tensor[2]);
-    p_current[0] = p_current[1] = p_current[2] = ave;
+    //p_current[0] = p_current[1] = p_current[2] = ave;
+    p_current[0] = p_current[1] = p_current[2] = pressure_scalar;
   } else if (pcouple == XY) {
     double ave = 0.5 * (tensor[0] + tensor[1]);
     p_current[0] = p_current[1] = ave;
@@ -1535,10 +1563,10 @@ void FixPIMD::nh_omega_dot()
   //fprintf(universe->ulogfile,"volume: %f \n", volume);
 
   if(universe->me==0)
-    printf("volume 0: %f, %f, %f, %f \n", volume, domain->xprd, domain->yprd, domain->zprd);
+    printf("volume 0/pressure: %f, %f, %f, %f, %f \n", volume, domain->xprd, domain->yprd, domain->zprd, p_current[0]);
 
-  if(universe->me==6)
-    printf("volume 6: %f \n", volume);
+  //if(universe->me==6)
+  //  printf("volume 6: %f \n", volume);
 
   if (deviatoric_flag) compute_deviatoric();
 
@@ -2161,6 +2189,32 @@ void FixPIMD::nhc_temp_integrate()
     }
   }
 }
+
+//CM
+//computes pressure virial
+//need to improve
+void FixPIMD::compute_pressure_scalar()
+{
+  double **f = atom->f;
+  double **x = atom->x;
+  double p_virial=0.0;
+  double volume = domain->xprd*domain->yprd*domain->zprd;
+  t_current = temperature->compute_scalar();
+
+  //pressure_scalar=atom->nlocal*boltz*t_current/volume*nktv2p;
+  //scalar = (temperature->dof * boltz * t + virial[0] + virial[1] + virial[2]) / 3.0 * inv_volume * nktv2p;
+  pressure_scalar = (temperature->dof * boltz * t_current ) / 3.0/ volume * nktv2p;
+
+  for (int i = 0; i < atom->nlocal; i++) {
+      p_virial += f[i][0] * x[i][0];
+      p_virial += f[i][1] * x[i][1];
+      p_virial += f[i][2] * x[i][2];
+  } 
+  pressure_scalar += (p_virial/3.0/volume*nktv2p);
+
+  if(universe->me==0) printf("pressure: %f \n", pressure_scalar);
+}
+
 
 /* ---------------------------------------------------------------------- */
 /*

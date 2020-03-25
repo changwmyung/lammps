@@ -191,6 +191,11 @@ class FixPIMD : public Fix {
 
   //CM test function 
   void remove_spring_force();
+  void multiply_post_force();
+  void divide_post_force();
+  //pressure virial
+  void compute_pressure_scalar();
+  double pressure_scalar;
 
   class Compute *temperature,*pressure;
 
