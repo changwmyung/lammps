@@ -199,7 +199,7 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
   // convert input periods to frequencies
   //CM 
   //need to make it parameter 
-  t_freq = 1.0;
+  t_freq =0.01;
   p_freq[0] = p_freq[1] = p_freq[2] = p_freq[3] = p_freq[4] = p_freq[5] = 0.0;
 
   //if (tstat_flag) t_freq = 1.0 / t_period;
@@ -493,6 +493,7 @@ void FixPIMD::setup(int vflag)
 
   //CM
   //force is updated first 
+  post_force(vflag);  //previous post_force function
 
   //post_force(vflag);  //previous post_force function
   //remove_spring_force();
@@ -512,14 +513,17 @@ void FixPIMD::setup(int vflag)
 
   if (pstat_flag) compute_press_target();
 
+  comm_exec(atom->x);
+  remove_spring_force();
   if (pstat_flag) {
     if (pstyle == ISO) pressure->compute_scalar();
     else pressure->compute_vector();
     couple();
     pressure->addstep(update->ntimestep+1);
   }
+  comm_exec(atom->x);
+  spring_force();
 
-  post_force(vflag);  //previous post_force function
 
   //CM 
   //spring_force();
@@ -606,6 +610,8 @@ void FixPIMD::initial_integrate(int /*vflag*/)
 //    multiply_post_force();
 ////////
 
+    comm_exec(atom->x);
+    remove_spring_force();
     if (pstat_flag) {
       if (pstyle == ISO) {
         temperature->compute_scalar();
@@ -617,6 +623,8 @@ void FixPIMD::initial_integrate(int /*vflag*/)
       couple();
       pressure->addstep(update->ntimestep+1);
     }
+    comm_exec(atom->x);
+    spring_force();
 
 //  For test purpose,
 //    spring_force();
@@ -689,6 +697,8 @@ void FixPIMD::final_integrate()
 //    multiply_post_force();
 ////////
 
+    comm_exec(atom->x);
+    remove_spring_force();
     if (pstat_flag) {
       if (pstyle == ISO) pressure->compute_scalar();
       else {
@@ -698,6 +708,8 @@ void FixPIMD::final_integrate()
       couple();
       pressure->addstep(update->ntimestep+1);
     }
+    comm_exec(atom->x);
+    spring_force();
 
 //  For test purpose,
 //    spring_force();
@@ -924,7 +936,8 @@ void FixPIMD::nhc_update_v()
 /* ----------------------------------------------------------------------
    Normal Mode PIMD
 ------------------------------------------------------------------------- */
-
+//CM
+//need to understand this properly
 void FixPIMD::nmpimd_init()
 {
   memory->create(M_x2xp, np, np, "fix_feynman:M_x2xp");
@@ -934,6 +947,8 @@ void FixPIMD::nmpimd_init()
 
   lam = (double*) memory->smalloc(sizeof(double)*np, "FixPIMD::lam");
 
+  // CM
+  // In this setting, proc0 is the centroid mode.
   // Set up  eigenvalues
 
   lam[0] = 0.0;
@@ -987,7 +1002,8 @@ void FixPIMD::nmpimd_init()
 }
 
 /* ---------------------------------------------------------------------- */
-
+//CM
+//what is this?
 void FixPIMD::nmpimd_fill(double **ptr)
 {
   comm_ptr = ptr;
@@ -1484,7 +1500,9 @@ void FixPIMD::couple()
   double *tensor = pressure->vector;
   
   //CM
-  compute_pressure_scalar();
+  //remove_spring_force();
+  //compute_pressure_scalar();
+  //spring_force();
 
   if (pstyle == ISO)
     //CM
@@ -1492,8 +1510,8 @@ void FixPIMD::couple()
     //p_current[0] = p_current[1] = p_current[2] = 400.0;
   else if (pcouple == XYZ) {
     double ave = 1.0/3.0 * (tensor[0] + tensor[1] + tensor[2]);
-    //p_current[0] = p_current[1] = p_current[2] = ave;
-    p_current[0] = p_current[1] = p_current[2] = pressure_scalar;
+    p_current[0] = p_current[1] = p_current[2] = ave;
+    //p_current[0] = p_current[1] = p_current[2] = pressure_scalar;
   } else if (pcouple == XY) {
     double ave = 0.5 * (tensor[0] + tensor[1]);
     p_current[0] = p_current[1] = ave;
@@ -2203,14 +2221,17 @@ void FixPIMD::compute_pressure_scalar()
 
   //pressure_scalar=atom->nlocal*boltz*t_current/volume*nktv2p;
   //scalar = (temperature->dof * boltz * t + virial[0] + virial[1] + virial[2]) / 3.0 * inv_volume * nktv2p;
-  pressure_scalar = (temperature->dof * boltz * t_current ) / 3.0/ volume * nktv2p;
+  pressure_scalar = ( atom->nlocal* boltz * t_current ) / volume * nktv2p;
 
+  comm_exec(atom->x);
+  remove_spring_force();
   for (int i = 0; i < atom->nlocal; i++) {
-      p_virial += f[i][0] * x[i][0];
-      p_virial += f[i][1] * x[i][1];
-      p_virial += f[i][2] * x[i][2];
+      p_virial += np*f[i][0] * x[i][0];
+      p_virial += np*f[i][1] * x[i][1];
+      p_virial += np*f[i][2] * x[i][2];
   } 
   pressure_scalar += (p_virial/3.0/volume*nktv2p);
+  spring_force();
 
   if(universe->me==0) printf("pressure: %f \n", pressure_scalar);
 }
