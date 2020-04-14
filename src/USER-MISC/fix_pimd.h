@@ -53,6 +53,8 @@ class FixPIMD : public Fix {
   int method;
   int np;
   double inverse_np;
+  //CM centroid approx. for barostat
+  int method_centroid;
 
   /* ring-polymer model */
 
@@ -62,7 +64,7 @@ class FixPIMD : public Fix {
   void spring_force();
 
   /* fictious mass */
-
+  // mass: nmpimd mass 
   double fmass, *mass;
 
   /* inter-partition communication */
@@ -111,20 +113,26 @@ class FixPIMD : public Fix {
   void nhc_update_x();
 
   /* NPT variables  */
+  int tstat_flag;
+  double t_period;
+
+  int *rfix;                       // indices of rigid fixes
   int dimension;
   int pstyle,pcouple;
   int p_flag[6];                   // 1 if control P on this dim, 0 if not
   double p_start[6],p_stop[6];
   double p_freq[6],p_target[6];
   double p_current[6];
+  double pressure_vector[6];	   // manual calculation of pressure vector
   double p_freq_max;               // maximum barostat frequency
   double omega[6],omega_dot[6];
-  double posexp[3];                // position update by omega_dot
+  double posexp[3];                // position scaling update by omega_dot
+  double velexp[3];                // velocity scaling update by omega_dot
+  double cellexp[3];               // cell scaling update by omega_dot
   double omega_mass[6];
   double h0_inv[6];                // h_inv of reference (zero strain) box
   int deviatoric_flag;             // 0 if target stress tensor is hydrostatic 
   double p_hydro;                  // hydrostatic target pressure
-  double t_current;
   double sigma[6];                 // scaled target stress
   double fdev[6];                  // deviatoric force on barostat
   int allremap;
@@ -154,10 +162,16 @@ class FixPIMD : public Fix {
   double dthalf,dt4,dt8,dto;                                               
   double boltz,nktv2p,tdof;  
 
-  char *id_temp,*id_press;
+  char *id_temp,*id_press,*id_pe;
 
   int mtk_flag;                    // 0 if using Hoover barostat
   double mtk_term1,mtk_term2;      // Martyna-Tobias-Klein corrections
+
+  //fullcell fluctuations related 
+  int flipflag;                    // 1 if box flips are invoked as needed
+  int pre_exchange_flag;           // set if pre_exchange needed for box flips
+  virtual void pre_exchange();
+  class Irregular *irregular;      // for migrating atoms after box flips
 
   //barostat variables
   //this I need to be careful about. they used ** instead of *.
@@ -196,8 +210,70 @@ class FixPIMD : public Fix {
   //pressure virial
   void compute_pressure_scalar();
   double pressure_scalar;
+  void compute_pressure_vector();
+  //temp measure
+  //scalar
+  double compute_temp_scalar();
+  double t_current;
+  double *t_current_beads;
+  double t_current_avg;
+  double compute_avg(double *, int );
+  double compute_sum(double *, int );
+  void observe_temp_scalar();
 
-  class Compute *temperature,*pressure;
+  //vector
+  double *t_current_vector;
+  double **t_current_vector_beads;
+  double *t_current_vector_avg;
+  void compute_temp_vector();
+
+  //observable
+  double vol_current;
+  void monitor_observable();
+  void initialize_logfile();
+  double etot; 
+  void observe_etot();
+
+  //pe
+  double pe_current; 
+  double *pe_current_beads;  
+  double pe_current_avg; 
+  void observe_pe_avg();
+
+  //vir
+  double vir_current;
+  double *vir_current_beads; 
+  double vir_current_avg;
+  void observe_virial_avg();
+  double **x_buff;
+
+  //consv energy 
+  double E_consv;
+  void observe_E_consv();
+  void observe_eta_E_sum();
+  double eta_E;
+  double *eta_E_beads;
+  double eta_E_sum;
+  void observe_omega_E();
+  double omega_E;
+  void observe_etap_E_sum();
+  double etap_E_sum;
+
+  double *spring_energy_beads;
+  double spring_energy_sum;
+  void observe_spring_energy_sum();
+
+  class Compute *temperature,*pressure,*pe;
+
+  //CM diagonalization routine
+  void dsyevc3(double **, double *);
+  void dsyevv3(double **, double **, double *);
+  double **hg_dot;
+  double **eigv;
+  double *omega_dot_eig;
+
+  //CM output file 
+  FILE *pimdfile;  // pimd log file
 
 };
 
