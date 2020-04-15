@@ -1214,8 +1214,10 @@ void FixPIMD::nmpimd_init()
     for(int j=0; j<np; j++)
     {
       M_xp2x[i][j] = M_x2xp[j][i] * np;
+      // CM found a bug
       M_f2fp[i][j] = M_x2xp[i][j] * np;
-      M_fp2f[i][j] = M_xp2x[i][j];
+      //M_fp2f[i][j] = M_xp2x[i][j];
+      M_fp2f[i][j] = M_xp2x[i][j] / np;
     }
 
   // Set up masses
@@ -3000,12 +3002,35 @@ void FixPIMD::observe_virial_avg()
 //direct summation of virial, but lots of fluctuations...
   comm_exec(atom->x);
   remove_spring_force();
+//CM
+//transform forces in real coordinates
+
+//  if(universe->me==0)
+//    printf("force0: %f %f %f \n", atom->f[150][0],atom->f[150][1],atom->f[150][2]);
+
+  nmpimd_fill(atom->f);
+  comm_exec(atom->f);
+  nmpimd_transform(buf_beads, atom->f, M_fp2f[universe->iworld]);
+
+//  if(universe->me==0)
+//    printf("force1: %f %f %f \n", atom->f[150][0],atom->f[150][1],atom->f[150][2]);
+
   for (int i = 0; i < atom->nlocal; i++) {
     for(int j=0; j<3; j++){
-      vir_current -= atom->f[i][j] * (xx[i][j] - x_c[i][j]);
+      double ff=atom->f[i][j];
+      vir_current -= ff * (xx[i][j] - x_c[i][j]);
     }
   }
   vir_current*=0.5;
+
+  nmpimd_fill(atom->f);
+  comm_exec(atom->f);
+  nmpimd_transform(buf_beads, atom->f, M_f2fp[universe->iworld]);
+
+//  if(universe->me==0)
+//    printf("force0: %f %f %f \n", atom->f[150][0],atom->f[150][1],atom->f[150][2]);
+
+  comm_exec(atom->x);
   spring_force();
 
 ////  //CM
