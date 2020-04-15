@@ -88,7 +88,7 @@ enum{REDUCE,FULL};
 FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
 {
   method     = PIMD;
-//  method_centroid = FULL;
+  method_centroid = FULL;
   fmass      = 1.0;
   nhc_temp   = 298.15;
   nhc_nchain = 2;
@@ -141,7 +141,7 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
     p_flag[i] = 0;
   }
 
-  for(int i=3; i<narg-1; i+=1)
+  for(int i=3; i<narg; i+=1)
   {
     if(strcmp(arg[i],"method")==0)
     {
@@ -202,10 +202,10 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
       //iarg += 4;
     }
 
-//    // centroid approximation for pressure virial & barostat
-//    else if (strcmp(arg[i],"reduce") == 0) {
-//      method_centroid=REDUCE;
-//    }
+    // centroid approximation for pressure virial & barostat
+    else if (strcmp(arg[i],"reduce") == 0) {
+      method_centroid=REDUCE;
+    }
     //else error->universe_all(arg[i],i+1,"Unkown keyword for fix pimd");
   }
 
@@ -641,21 +641,41 @@ void FixPIMD::setup(int vflag)
   //t_current = temperature->compute_scalar();
   t_current = compute_temp_scalar();
   tdof = temperature->dof;
-  //if(universe->me==0) printf("tdof: %f\n", tdof);
+  if(universe->me==0) printf("tdof: %f\n", tdof);
 
   if (pstat_flag) compute_press_target();
 
 //  comm_exec(atom->x);
 //  remove_spring_force();
-  if (pstat_flag) {
-    if (pstyle == ISO){ 
-      pressure->compute_scalar();
-        if (pcouple == XYZ) pressure->compute_vector();
+    if (pstat_flag) {
+      if (pstyle == ISO){ 
+        //pressure->compute_scalar();
+        compute_pressure_scalar();
+        if (pcouple == XYZ){
+          //pressure->compute_vector();
+              compute_pressure_vector();
+          }
+        }
+      if (pstyle == TRICLINIC){ 
+        //pressure->compute_vector();
+        compute_pressure_vector();
       }
-    if (pstyle == TRICLINIC) pressure->compute_vector();
-    couple();
-    pressure->addstep(update->ntimestep+1);
-  }
+      couple();
+      pressure->addstep(update->ntimestep+1);
+    }
+
+//  else{
+//    if (pstat_flag) {
+//      if (pstyle == ISO){ 
+//        pressure->compute_scalar();
+//          if (pcouple == XYZ) pressure->compute_vector();
+//        }
+//      if (pstyle == TRICLINIC) pressure->compute_vector();
+//      couple();
+//      pressure->addstep(update->ntimestep+1);
+//    }
+//  }
+
 //  comm_exec(atom->x);
 //  spring_force();
 
@@ -691,14 +711,24 @@ void FixPIMD::setup(int vflag)
 
     // CM
     double nkt = (atom->natoms + 1) * kt;
+    double npkt = (atom->natoms*np + 1) * kt;
 
     for (int i = 0; i < 3; i++)
-      if (p_flag[i])
-        omega_mass[i] = nkt/(p_freq[i]*p_freq[i]);
+      if (p_flag[i]){
+        if(method_centroid==REDUCE)
+          omega_mass[i] = nkt/(p_freq[i]*p_freq[i]);
+        else
+          omega_mass[i] = npkt/(p_freq[i]*p_freq[i]);
+      }
 
     if (pstyle == TRICLINIC) {
       for (int i = 3; i < 6; i++)
-        if (p_flag[i]) omega_mass[i] = nkt/(p_freq[i]*p_freq[i]);
+        if (p_flag[i]){
+          if(method_centroid==REDUCE)
+             omega_mass[i] = nkt/(p_freq[i]*p_freq[i]);
+          else
+             omega_mass[i] = npkt/(p_freq[i]*p_freq[i]);
+       }
     }
 
   // masses and initial forces on barostat thermostat variables
@@ -758,23 +788,30 @@ void FixPIMD::initial_integrate(int /*vflag*/)
 
 //    comm_exec(atom->x);
 //    remove_spring_force();
-    if (pstat_flag) {
-      if (pstyle == ISO) {
-        t_current = compute_temp_scalar();
-        temperature->compute_scalar();
-        pressure->compute_scalar();
-        if (pcouple == XYZ){
-          pressure->compute_vector();
+
+//    if(universe->me==0){
+      if (pstat_flag) {
+        if (pstyle == ISO) {
+          t_current = compute_temp_scalar();
+          temperature->compute_scalar();
+          //pressure->compute_scalar();
+          compute_pressure_scalar();
+          if (pcouple == XYZ){
+            //pressure->compute_vector();
+            compute_pressure_vector();
+          }
+        } else {
+          t_current = compute_temp_scalar();
+          compute_temp_vector();
+          temperature->compute_vector();
+          //pressure->compute_vector();
+          compute_pressure_vector();
         }
-      } else {
-        t_current = compute_temp_scalar();
-        compute_temp_vector();
-        temperature->compute_vector();
-        pressure->compute_vector();
+        couple();
+        pressure->addstep(update->ntimestep+1);
       }
-      couple();
-      pressure->addstep(update->ntimestep+1);
-    }
+//    }
+
 //    comm_exec(atom->x);
 //    spring_force();
 
@@ -797,6 +834,12 @@ void FixPIMD::initial_integrate(int /*vflag*/)
           MPI_Bcast(eigv[i], 3, MPI_DOUBLE, 0, universe->uworld);}
       }
       MPI_Barrier(universe->uworld);
+
+      //centroid approx.
+      if(method_centroid==REDUCE){
+        if(universe->me==0) nh_omega_dot_x();}
+      else if(method_centroid==FULL){
+        nh_omega_dot_x();}
 
       //CM
       //reduced centroid eom.
@@ -857,24 +900,31 @@ void FixPIMD::final_integrate()
 
 //    comm_exec(atom->x);
 //    remove_spring_force();
-    if (pstat_flag) {
-      if (pstyle == ISO){
-        t_current = compute_temp_scalar();
-        temperature->compute_scalar();
-        pressure->compute_scalar();
-        if (pcouple == XYZ){
-          pressure->compute_vector();
+//    if(universe->me==0){
+      if (pstat_flag) {
+        if (pstyle == ISO){
+          t_current = compute_temp_scalar();
+          temperature->compute_scalar();
+          //pressure->compute_scalar();
+          compute_pressure_scalar();
+          if (pcouple == XYZ){
+            //pressure->compute_vector();
+            compute_pressure_vector();
+          }
         }
+        else {
+          t_current = compute_temp_scalar();
+          compute_temp_vector();
+          temperature->compute_vector();
+          //pressure->compute_vector();
+          compute_pressure_vector();
+        }
+        couple();
+        pressure->addstep(update->ntimestep+1);
       }
-      else {
-        t_current = compute_temp_scalar();
-        compute_temp_vector();
-        temperature->compute_vector();
-        pressure->compute_vector();
-      }
-      couple();
-      pressure->addstep(update->ntimestep+1);
-    }
+//    }
+
+
 //    comm_exec(atom->x);
 //    spring_force();
 
@@ -895,6 +945,13 @@ void FixPIMD::final_integrate()
         MPI_Bcast(eigv[i], 3, MPI_DOUBLE, 0, universe->uworld);}
     }
     MPI_Barrier(universe->uworld);
+
+    if(method_centroid==REDUCE){
+      //reduced 
+      if(universe->me==0) nh_omega_dot_x();}
+    else if(method_centroid==FULL){
+      nh_omega_dot_x();}
+
 
     // update eta_dot
     // update eta_press_dot
@@ -1682,6 +1739,7 @@ void FixPIMD::couple()
   double *tensor = pressure->vector;
   
   //CM
+  //compute_pressure_scalar();
   //remove_spring_force();
   //compute_pressure_scalar();
   //compute_pressure_vector();
@@ -1690,7 +1748,7 @@ void FixPIMD::couple()
 
   if (pstyle == ISO){
     //CM
-    p_current[0] = p_current[1] = p_current[2] = pressure->compute_scalar();
+    p_current[0] = p_current[1] = p_current[2] = pressure->scalar;
 //    if(universe->me==0)
 //      printf("couple(iso) pressure: %f \n", p_current[0]);
   }
@@ -1847,8 +1905,14 @@ void FixPIMD::nh_omega_dot()
   mtk_term1 = 0.0;
   if (mtk_flag) {
     if (pstyle == ISO) {
-      mtk_term1 = tdof * boltz * t_current;
-      mtk_term1 /= pdim * atom->natoms;
+      if (method_centroid==REDUCE){
+        mtk_term1 = tdof * boltz * t_current;
+        mtk_term1 /= pdim * atom->natoms;
+      }
+      else if (method_centroid==FULL){
+        mtk_term1 = tdof * boltz * t_current_avg;
+        mtk_term1 /= pdim * atom->natoms;
+      }
     } else {
       compute_temp_vector();
       //CM is it right?
@@ -1864,6 +1928,10 @@ void FixPIMD::nh_omega_dot()
 //  if (method_centroid == FULL){
 //    if(universe->me==0){
 //      printf("FULL\n");}
+//  }
+//  else if (method_centroid == REDUCE){
+//    if(universe->me==0){
+//      printf("REDUCE\n");}
 //  }
 
   for (int i = 0; i < 3; i++)
@@ -1887,12 +1955,38 @@ void FixPIMD::nh_omega_dot()
     }
   }
 
-//  //CM
-//  if(universe->me==0){
-//    printf("omega_dot/p_current/p_hydro: %f / %f / %f \n", omega_dot[0], p_current[0], p_hydro);
-//    printf("p_current: %f / %f / %f \n", p_current[0],p_current[1],p_current[2]);
-//    printf("p_current: %f / %f / %f \n", p_current[3],p_current[4],p_current[5]);
-//  }
+  vol_current=volume;
+
+}
+
+void FixPIMD::nh_omega_dot_x()
+{
+  double f_omega,volume;
+  double **x = atom->x;
+  //CM position in eigenspace
+  double **xx;
+  int nlocal = atom->nlocal;
+
+  double h[6];
+  //CM eigen transformation
+  double **hh, **hh_eigv, *h_eig;
+
+  hh = new double*[3];
+  for(int i = 0; i < 3; ++i)
+      hh[i] = new double[3];
+
+  hh_eigv = new double*[3];
+  for(int i = 0; i < 3; ++i)
+      hh_eigv[i] = new double[3];
+
+  h_eig = new double[3];
+
+  //CM 
+  xx = new double*[nlocal];
+  for(int i = 0; i < nlocal; ++i)
+    xx[i] = new double[3];
+
+/* position update */
 
   //CM the position scaling update 
   //eq(3.5.1) in [2]
@@ -1970,10 +2064,12 @@ void FixPIMD::nh_omega_dot()
         }
       }
     }
-    if (pdim > 0) mtk_term2 /= pdim * atom->natoms;
+    if (method_centroid==REDUCE){
+      if (pdim > 0) mtk_term2 /= pdim * atom->natoms;}
+    else if (method_centroid==FULL){
+      if (pdim > 0) mtk_term2 /= pdim * atom->natoms * np;}
   }
 
-  vol_current=volume;
 }
 
 /* ----------------------------------------------------------------------
@@ -2859,6 +2955,7 @@ void FixPIMD::observe_virial_avg()
 //  double **ff;
 
   double xx[atom->nlocal][3];
+  double x_c[atom->nlocal][3];
   double centroid=0.0;
 //  memcpy(xx, atom->x, atom->nlocal*3*sizeof(double));
 
@@ -2877,20 +2974,35 @@ void FixPIMD::observe_virial_avg()
 //  }
 //  vir_current*=-0.5;
 
+//CM store centroid 
+  nmpimd_fill(atom->x);
+  comm_exec(atom->x);
+  nmpimd_transform(buf_beads, atom->x, M_x2xp[universe->iworld]);
+  
+  if(universe->me==0){
+    for (int i = 0; i < atom->nlocal; i++) {
+      for(int j=0; j<3; j++){
+        x_c[i][j]=atom->x[i][j]; 
+      }
+    }
+  }
+
+  nmpimd_fill(atom->x);
+  comm_exec(atom->x);
+  nmpimd_transform(buf_beads, atom->x, M_xp2x[universe->iworld]);
+//CM broadcast
+  MPI_Barrier(universe->uworld);
+  for(int i=0; i<atom->nlocal; i++){
+    MPI_Bcast(x_c[i], 3, MPI_DOUBLE, 0, universe->uworld);}
+  MPI_Barrier(universe->uworld);
+
 //CM
 //direct summation of virial, but lots of fluctuations...
   comm_exec(atom->x);
   remove_spring_force();
   for (int i = 0; i < atom->nlocal; i++) {
     for(int j=0; j<3; j++){
-      if(universe->me==0){
-        centroid=xx[i][j];
-      }
-      MPI_Barrier(universe->uworld);
-      MPI_Bcast(&centroid, 1, MPI_DOUBLE, 0, universe->uworld);
-      MPI_Barrier(universe->uworld);
-
-      vir_current -= atom->f[i][j] * (xx[i][j] - centroid);
+      vir_current -= atom->f[i][j] * (xx[i][j] - x_c[i][j]);
     }
   }
   vir_current*=0.5;
@@ -3031,7 +3143,7 @@ void FixPIMD::monitor_observable()
 
   if(universe->me==0){
     if (pimdfile){
-      fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f\n", update->ntimestep, t_current_avg, vol_current, pressure_current, E_consv/atom->nlocal, etot/boltz/atom->nlocal/(update->ntimestep), vir_current_avg/boltz/atom->nlocal);
+      fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f\n", update->ntimestep, t_current_avg, vol_current, pressure_current, E_consv, etot/boltz/atom->nlocal/(update->ntimestep), vir_current_avg/boltz/atom->nlocal);
 //      fprintf(pimdfile, "%f    %f    %f \n", eta_E_sum, etap_E_sum, omega_E);
     }
   }
@@ -3077,6 +3189,58 @@ double FixPIMD::compute_avg(double *array, int n)
   }
   return sum / n;
 }
+
+//wrapper function for pimd pressure virial calculation
+void FixPIMD::compute_pressure_scalar()
+{
+  //CM compute the pressure in NM coordinates
+  if(method==CMD || method==NMPIMD)
+  {
+//      if(universe->me==7)
+//        printf("position0: %f %f %f \n", atom->x[150][0],atom->x[150][1],atom->x[150][2]);
+  
+      nmpimd_fill(atom->x);
+      comm_exec(atom->x);
+      nmpimd_transform(buf_beads, atom->x, M_x2xp[universe->iworld]);
+  
+//      if(universe->me==7)
+//        printf("position1: %f %f %f \n", atom->x[150][0],atom->x[150][1],atom->x[150][2]);
+  
+      pressure->compute_scalar();
+
+      nmpimd_fill(atom->x);
+      comm_exec(atom->x);
+      nmpimd_transform(buf_beads, atom->x, M_xp2x[universe->iworld]);
+
+//      if(universe->me==7)
+//        printf("position0: %f %f %f \n", atom->x[150][0],atom->x[150][1],atom->x[150][2]);
+  }
+  else{
+    pressure->compute_scalar();}
+}
+
+//wrapper function for pimd pressure virial calculation
+void FixPIMD::compute_pressure_vector()
+{
+  //CM compute the pressure in NM coordinates
+  if(method==CMD || method==NMPIMD)
+  {
+      nmpimd_fill(atom->x);
+      comm_exec(atom->x);
+
+      nmpimd_transform(buf_beads, atom->x, M_x2xp[universe->iworld]);
+      pressure->compute_vector();
+  
+      nmpimd_fill(atom->x);
+      comm_exec(atom->x);
+
+      nmpimd_transform(buf_beads, atom->x, M_xp2x[universe->iworld]);
+  }
+  else{
+    pressure->compute_vector();}
+}
+
+/*
 
 //CM
 //computes pressure virial
@@ -3151,6 +3315,8 @@ void FixPIMD::compute_pressure_vector()
   if(universe->me==0) printf("pressure: %f %f %f \n", pressure_vector[0], pressure_vector[1], pressure_vector[2]);
   if(universe->me==0) printf("pressure: %f %f %f \n", pressure_vector[3], pressure_vector[4], pressure_vector[5]);
 }
+
+*/
 
 // ----------------------------------------------------------------------------
 void FixPIMD::dsyevc3(double **A, double *w)

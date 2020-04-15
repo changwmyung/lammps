@@ -192,6 +192,7 @@ class FixPIMD : public Fix {
   void compute_press_target();
   void couple();
   void nh_omega_dot();
+  void nh_omega_dot_x();
   void compute_deviatoric();
   void nhc_press_integrate();
   void nhc_temp_integrate();
