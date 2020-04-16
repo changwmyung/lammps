@@ -764,7 +764,9 @@ void FixPIMD::initial_integrate(int /*vflag*/)
 {
   //CM debug
   //observe_temp_scalar();
-  monitor_observable();
+  if(update->ntimestep%100==0){
+    monitor_observable();
+  }
 
   if (pstat_flag && mpchain){
 
@@ -843,7 +845,13 @@ void FixPIMD::initial_integrate(int /*vflag*/)
 
       //CM
       //reduced centroid eom.
-      if(universe->me==0) nh_v_press();
+      //if(universe->me==0) nh_v_press();
+      if(method_centroid==REDUCE){
+        if(universe->me==0) nh_v_press();
+      }
+      else if(method_centroid==FULL){
+        nh_v_press();
+      }
       
     }
 
@@ -879,8 +887,14 @@ void FixPIMD::final_integrate()
 
     //CM
     //scaling is only for centroid
-    if(universe->me==0) nh_v_press();
+    //if(universe->me==0) nh_v_press();
     //nh_v_press();
+    if(method_centroid==REDUCE){
+      if(universe->me==0) nh_v_press();
+    }
+    else if(method_centroid==FULL){
+      nh_v_press();
+    }
 
     // compute new T,P after velocities rescaled by nh_v_press()
     // compute appropriately coupled elements of mvv_current
@@ -1820,9 +1834,7 @@ Eq(3.5) J. Chem. Phys. 110 3275 (1999)
 void FixPIMD::nh_omega_dot()
 {
   double f_omega,volume;
-  double **x = atom->x;
-  //CM position in eigenspace
-  double **xx;
+//  double **x = atom->x;
   int nlocal = atom->nlocal;
 
   double h[6];
@@ -1838,11 +1850,6 @@ void FixPIMD::nh_omega_dot()
       hh_eigv[i] = new double[3];
 
   h_eig = new double[3];
-
-  //CM 
-  xx = new double*[nlocal];
-  for(int i = 0; i < nlocal; ++i)
-    xx[i] = new double[3];
 
   if (pstyle == TRICLINIC) {
     h[0]=domain->h[0];
@@ -1959,6 +1966,19 @@ void FixPIMD::nh_omega_dot()
 
   vol_current=volume;
 
+  //delete
+  for(int i = 0; i < 3; ++i){
+    delete[] hh[i];
+  }
+  delete[] hh;
+
+  for(int i = 0; i < 3; ++i){
+    delete[] hh_eigv[i];
+  }
+  delete[] hh_eigv;
+
+  delete[] h_eig;
+
 }
 
 void FixPIMD::nh_omega_dot_x()
@@ -2071,6 +2091,24 @@ void FixPIMD::nh_omega_dot_x()
     else if (method_centroid==FULL){
       if (pdim > 0) mtk_term2 /= pdim * atom->natoms * np;}
   }
+
+  //delete
+  for(int i = 0; i < 3; ++i){
+    delete[] hh[i];
+  }
+  delete[] hh;
+
+  for(int i = 0; i < 3; ++i){
+    delete[] hh_eigv[i];
+  }
+  delete[] hh_eigv;
+
+  delete[] h_eig;
+
+  for(int i = 0; i < nlocal; ++i){
+    delete[] xx[i];
+  }
+  delete[] xx;
 
 }
 
@@ -2196,6 +2234,12 @@ void FixPIMD::nh_v_press()
     }
 
   }
+
+  for(int i = 0; i < nlocal; ++i){
+    delete[] vv[i];
+  }
+  delete[] vv;
+
 }
 
 /* ----------------------------------------------------------------------
@@ -2553,6 +2597,18 @@ void FixPIMD::remap()
   if (nrigid)
     for (i = 0; i < nrigid; i++)
       modify->fix[rfix[i]]->deform(1);
+
+  //delete
+  for(int i = 0; i < 3; ++i){
+    delete[] hh[i];
+  }
+  delete[] hh;
+
+  for(int i = 0; i < 3; ++i){
+    delete[] h2[i];
+  }
+  delete[] h2;
+
 
 }
 
@@ -2939,7 +2995,7 @@ void FixPIMD::compute_temp_vector()
 void FixPIMD::observe_etot()
 {
   int nlocal = atom->nlocal;
-  //etot=0.0;
+  etot=0.0;
   //temp contribution
   etot+=dimension*nlocal*boltz*t_current_avg/2.;
   //pe
@@ -3168,7 +3224,7 @@ void FixPIMD::monitor_observable()
 
   if(universe->me==0){
     if (pimdfile){
-      fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f\n", update->ntimestep, t_current_avg, vol_current, pressure_current, E_consv, etot/boltz/atom->nlocal/(update->ntimestep), vir_current_avg/boltz/atom->nlocal);
+      fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f\n", update->ntimestep, t_current_avg, vol_current, pressure_current, E_consv, etot/boltz/atom->nlocal, vir_current_avg/boltz/atom->nlocal);
 //      fprintf(pimdfile, "%f    %f    %f \n", eta_E_sum, etap_E_sum, omega_E);
     }
   }
@@ -3192,7 +3248,7 @@ void FixPIMD::initialize_logfile()
         " |_|   \\__,_|\\__|_| |_| |___|_| |_|\\__\\___|\\__, |_|  \\__,_|_| |_|  |_|____/   \n" 
         "                                           |___/                                    \n"  
         "                                                                   ver.2.0          \n"); 
-      fprintf(pimdfile, "Step    Temp (K)    Volume    Pressure    E_consv. (K)   Acc. E_tot (K/particle) \n");
+      fprintf(pimdfile, "Step    Temp (K)    Volume    Pressure    E_consv. (K)   E_tot (K/particle) \n");
     }
   }
 }
