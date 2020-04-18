@@ -520,13 +520,15 @@ void FixPIMD::init()
   if(universe->me==0)
     printf("Fix pimd -P/(beta^2 * hbar^2) = %20.7lE (kcal/mol/A^2)\n\n", fbond);
 
-  // CM 
-  // setting the time-step for npt as well
-  if (temperature->tempbias) which = BIAS;
-  else which = NOBIAS;
+//  // CM 
+//  // setting the time-step for npt as well
+//  if (temperature->tempbias) which = BIAS;
+//  else which = NOBIAS;
+//
+//  if(universe->me==0)
+//    printf("BIAS: %d \n", which);
 
-  if(universe->me==0)
-    printf("BIAS: %d \n", which);
+  which = NOBIAS;
 
   dtv = update->dt;
   dtf = 0.5 * update->dt * force->ftm2v;
