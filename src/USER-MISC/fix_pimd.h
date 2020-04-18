@@ -117,7 +117,6 @@ class FixPIMD : public Fix {
   double t_period;
 
   int *rfix;                       // indices of rigid fixes
-  int dimension;
   int pstyle,pcouple;
   int p_flag[6];                   // 1 if control P on this dim, 0 if not
   double p_start[6],p_stop[6];
@@ -275,6 +274,10 @@ class FixPIMD : public Fix {
 
   //CM output file 
   FILE *pimdfile;  // pimd log file
+
+ protected:
+  int dimension, which;
+
 
 };
 

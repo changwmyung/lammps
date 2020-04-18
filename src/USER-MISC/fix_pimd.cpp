@@ -520,9 +520,13 @@ void FixPIMD::init()
   if(universe->me==0)
     printf("Fix pimd -P/(beta^2 * hbar^2) = %20.7lE (kcal/mol/A^2)\n\n", fbond);
 
-
   // CM 
   // setting the time-step for npt as well
+  if (temperature->tempbias) which = BIAS;
+  else which = NOBIAS;
+
+  if(universe->me==0)
+    printf("BIAS: %d \n", which);
 
   dtv = update->dt;
   dtf = 0.5 * update->dt * force->ftm2v;
@@ -889,6 +893,16 @@ void FixPIMD::final_integrate()
     //scaling is only for centroid
     //if(universe->me==0) nh_v_press();
     //nh_v_press();
+
+//    // re-compute temp before nh_v_press()
+//    // only needed for temperature computes with BIAS on reneighboring steps:
+//    //   b/c some biases store per-atom values (e.g. temp/profile)
+//    //   per-atom values are invalid if reneigh/comm occurred
+//    //     since temp->compute() in initial_integrate()
+//  
+//    if (which == BIAS && neighbor->ago == 0)
+//      t_current = temperature->compute_scalar();
+
     if(method_centroid==REDUCE){
       if(universe->me==0) nh_v_press();
     }
@@ -1228,8 +1242,8 @@ void FixPIMD::nmpimd_init()
     for(int j=0; j<np; j++)
     {
       M_xp2x[i][j] = M_x2xp[j][i] * np;
-      // CM found a bug
       M_f2fp[i][j] = M_x2xp[i][j] * np;
+      // CM found a bug
       //M_fp2f[i][j] = M_xp2x[i][j];
       M_fp2f[i][j] = M_xp2x[i][j] / np;
     }
@@ -2174,18 +2188,41 @@ void FixPIMD::nh_v_press()
     factor[1] = exp(-dt4*(omega_dot[1]+mtk_term2));
     factor[2] = exp(-dt4*(omega_dot[2]+mtk_term2));
   
-    for (int i = 0; i < nlocal; i++) {
-      if (mask[i] & groupbit) {
-        v[i][0] *= factor[0];
-        v[i][1] *= factor[1];
-        v[i][2] *= factor[2];
-  //      if (pstyle == TRICLINIC) {
-  //        v[i][0] += -dthalf*(v[i][1]*omega_dot[5] + v[i][2]*omega_dot[4]);
-  //        v[i][1] += -dthalf*v[i][2]*omega_dot[3];
-  //      }
-        v[i][0] *= factor[0];
-        v[i][1] *= factor[1];
-        v[i][2] *= factor[2];
+    if (which == NOBIAS) {
+      for (int i = 0; i < nlocal; i++) {
+        if (mask[i] & groupbit) {
+          v[i][0] *= factor[0];
+          v[i][1] *= factor[1];
+          v[i][2] *= factor[2];
+    //      if (pstyle == TRICLINIC) {
+    //        v[i][0] += -dthalf*(v[i][1]*omega_dot[5] + v[i][2]*omega_dot[4]);
+    //        v[i][1] += -dthalf*v[i][2]*omega_dot[3];
+    //      }
+          v[i][0] *= factor[0];
+          v[i][1] *= factor[1];
+          v[i][2] *= factor[2];
+        }
+      }
+    }else if (which == BIAS) {
+
+//      if(universe->me==0)
+//        printf("bias v: %f %f %f \n", vbias[0]); 
+
+      for (int i = 0; i < nlocal; i++) {
+        if (mask[i] & groupbit) {
+          temperature->remove_bias(i,v[i]);
+          v[i][0] *= factor[0];
+          v[i][1] *= factor[1];
+          v[i][2] *= factor[2];
+    //      if (pstyle == TRICLINIC) {
+    //        v[i][0] += -dthalf*(v[i][1]*omega_dot[5] + v[i][2]*omega_dot[4]);
+    //        v[i][1] += -dthalf*v[i][2]*omega_dot[3];
+    //      }
+          v[i][0] *= factor[0];
+          v[i][1] *= factor[1];
+          v[i][2] *= factor[2];
+          temperature->restore_bias(i,v[i]);
+        }
       }
     }
   }
@@ -2196,15 +2233,31 @@ void FixPIMD::nh_v_press()
     factor[1] = exp(-dt4*(mtk_term2));
     factor[2] = exp(-dt4*(mtk_term2));
   
-    for (int i = 0; i < nlocal; i++) {
-      if (mask[i] & groupbit) {
-        v[i][0] *= factor[0];
-        v[i][1] *= factor[1];
-        v[i][2] *= factor[2];
+    if (which == NOBIAS) {
+      for (int i = 0; i < nlocal; i++) {
+        if (mask[i] & groupbit) {
+          v[i][0] *= factor[0];
+          v[i][1] *= factor[1];
+          v[i][2] *= factor[2];
 
-        v[i][0] *= factor[0];
-        v[i][1] *= factor[1];
-        v[i][2] *= factor[2];
+          v[i][0] *= factor[0];
+          v[i][1] *= factor[1];
+          v[i][2] *= factor[2];
+        }
+      }
+    }else if (which == BIAS) {
+      for (int i = 0; i < nlocal; i++) {
+        if (mask[i] & groupbit) {
+          temperature->remove_bias(i,v[i]);
+          v[i][0] *= factor[0];
+          v[i][1] *= factor[1];
+          v[i][2] *= factor[2];
+
+          v[i][0] *= factor[0];
+          v[i][1] *= factor[1];
+          v[i][2] *= factor[2];
+          temperature->restore_bias(i,v[i]);
+        }
       }
     }
 
@@ -3056,8 +3109,6 @@ void FixPIMD::observe_virial_avg()
 
 //CM
 //direct summation of virial, but lots of fluctuations...
-  comm_exec(atom->x);
-  remove_spring_force();
 //CM
 //transform forces in real coordinates
 
@@ -3067,6 +3118,9 @@ void FixPIMD::observe_virial_avg()
   nmpimd_fill(atom->f);
   comm_exec(atom->f);
   nmpimd_transform(buf_beads, atom->f, M_fp2f[universe->iworld]);
+
+  comm_exec(atom->x);
+  remove_spring_force();
 
 //  if(universe->me==0)
 //    printf("force1: %f %f %f \n", atom->f[150][0],atom->f[150][1],atom->f[150][2]);
@@ -3079,15 +3133,15 @@ void FixPIMD::observe_virial_avg()
   }
   vir_current*=0.5;
 
+  comm_exec(atom->x);
+  spring_force();
+
   nmpimd_fill(atom->f);
   comm_exec(atom->f);
   nmpimd_transform(buf_beads, atom->f, M_f2fp[universe->iworld]);
 
 //  if(universe->me==0)
 //    printf("force0: %f %f %f \n", atom->f[150][0],atom->f[150][1],atom->f[150][2]);
-
-  comm_exec(atom->x);
-  spring_force();
 
 ////  //CM
 ////  if(universe->me==0){
