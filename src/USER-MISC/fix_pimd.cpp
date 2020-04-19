@@ -72,7 +72,7 @@ using namespace FixConst;
 enum{PIMD,NMPIMD,CMD};
 
 //CM 
-enum{NOBIAS,BIAS};
+//enum{NOBIAS,BIAS};
 enum{NONE,XYZ,XY,YZ,XZ};
 enum{ISO,ANISO,TRICLINIC};
 enum{REDUCE,FULL};
@@ -528,7 +528,7 @@ void FixPIMD::init()
 //  if(universe->me==0)
 //    printf("BIAS: %d \n", which);
 
-  which = NOBIAS;
+//  which = NOBIAS;
 
   dtv = update->dt;
   dtf = 0.5 * update->dt * force->ftm2v;
@@ -2190,7 +2190,6 @@ void FixPIMD::nh_v_press()
     factor[1] = exp(-dt4*(omega_dot[1]+mtk_term2));
     factor[2] = exp(-dt4*(omega_dot[2]+mtk_term2));
   
-    if (which == NOBIAS) {
       for (int i = 0; i < nlocal; i++) {
         if (mask[i] & groupbit) {
           v[i][0] *= factor[0];
@@ -2205,28 +2204,9 @@ void FixPIMD::nh_v_press()
           v[i][2] *= factor[2];
         }
       }
-    }else if (which == BIAS) {
 
 //      if(universe->me==0)
 //        printf("bias v: %f %f %f \n", vbias[0]); 
-
-      for (int i = 0; i < nlocal; i++) {
-        if (mask[i] & groupbit) {
-          temperature->remove_bias(i,v[i]);
-          v[i][0] *= factor[0];
-          v[i][1] *= factor[1];
-          v[i][2] *= factor[2];
-    //      if (pstyle == TRICLINIC) {
-    //        v[i][0] += -dthalf*(v[i][1]*omega_dot[5] + v[i][2]*omega_dot[4]);
-    //        v[i][1] += -dthalf*v[i][2]*omega_dot[3];
-    //      }
-          v[i][0] *= factor[0];
-          v[i][1] *= factor[1];
-          v[i][2] *= factor[2];
-          temperature->restore_bias(i,v[i]);
-        }
-      }
-    }
   }
 
   else if (pstyle == TRICLINIC) {
@@ -2235,7 +2215,6 @@ void FixPIMD::nh_v_press()
     factor[1] = exp(-dt4*(mtk_term2));
     factor[2] = exp(-dt4*(mtk_term2));
   
-    if (which == NOBIAS) {
       for (int i = 0; i < nlocal; i++) {
         if (mask[i] & groupbit) {
           v[i][0] *= factor[0];
@@ -2245,20 +2224,6 @@ void FixPIMD::nh_v_press()
           v[i][0] *= factor[0];
           v[i][1] *= factor[1];
           v[i][2] *= factor[2];
-        }
-      }
-    }else if (which == BIAS) {
-      for (int i = 0; i < nlocal; i++) {
-        if (mask[i] & groupbit) {
-          temperature->remove_bias(i,v[i]);
-          v[i][0] *= factor[0];
-          v[i][1] *= factor[1];
-          v[i][2] *= factor[2];
-
-          v[i][0] *= factor[0];
-          v[i][1] *= factor[1];
-          v[i][2] *= factor[2];
-          temperature->restore_bias(i,v[i]);
         }
       }
     }
