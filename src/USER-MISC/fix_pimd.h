@@ -272,6 +272,13 @@ class FixPIMD : public Fix {
   double **eigv;
   double *omega_dot_eig;
 
+  //CM MPI Comm
+  MPI_Group world_group;
+  MPI_Group beads_group;
+  MPI_Comm beads_comm;
+  int beads_rank; 
+  int beads_size;
+
   //CM output file 
   FILE *pimdfile;  // pimd log file
 

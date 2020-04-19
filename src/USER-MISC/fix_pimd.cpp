@@ -60,6 +60,8 @@
 #include "fix_deform.h"
 #include "compute.h"
 #include "kspace.h"
+#include <stdlib.h>
+#include <stdio.h>
 //#include "respa.h"
 
 using namespace LAMMPS_NS;
@@ -285,7 +287,8 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
 
   // thermostat variables initialization
   // CM
-  int max = 3 * atom->nlocal;
+  //int max = 3 * atom->nlocal;
+  int max = 3 * atom->natoms;
   int ich;
   
   if(universe->me==0) printf("memory start\n");
@@ -460,6 +463,8 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
 
   pimdfile = fopen("pimd.log","w");
   initialize_logfile();
+
+
 }
 
 /* ---------------------------------------------------------------------- */
@@ -611,13 +616,51 @@ void FixPIMD::init()
   //CM total energy measure
   etot=0.0;
 
+  //MPI Comm Group 
+  //communication between beads
+  int ranks_beads[np]; 
+  for(int i=0; i<np; i++)
+  {
+    ranks_beads[i]=i*comm->nprocs;
+  }
+
+//  printf("COMM RANK/SIZE: %d/%d \n",
+//    comm->me, comm->nprocs);
 
 
+  //CM beads-to-beads MPI Comm
+  int color=universe->me%comm->nprocs; 
 
+  MPI_Comm_split(universe->uworld,color,universe->me,&beads_comm);
+  MPI_Comm_rank(beads_comm, &beads_rank);
+  MPI_Comm_size(beads_comm, &beads_size);
 
+  printf("WORLD RANK/SIZE: %d/%d --- PRIME RANK/SIZE: %d/%d\n",
+    universe->me, universe->nprocs, beads_rank, beads_size);
 
-
-
+//  // Get the group of processes in MPI_COMM_WORLD
+//  MPI_Comm_group(universe->uworld, &world_group);
+//  //MPI_Comm_group(MPI_COMM_WORLD, &world_group);
+//
+//  // Construct a group containing all of the prime ranks for beads communications
+//  MPI_Group_incl(world_group, np, ranks_beads, &beads_group);
+//
+//  // Create a new communicator based on the group
+//  MPI_Comm_create_group(universe->uworld, beads_group, 0, &beads_comm);
+//  //MPI_Comm_create_group(MPI_COMM_WORLD, beads_group, 0, &beads_comm);
+//
+//  beads_rank = -1, beads_size = -1;
+//  // If this rank isn't in the new communicator, it will be MPI_COMM_NULL
+//  // Using MPI_COMM_NULL for MPI_Comm_rank or MPI_Comm_size is erroneous
+//  if (MPI_COMM_NULL != beads_comm) {
+//    MPI_Comm_rank(beads_comm, &beads_rank);
+//    MPI_Comm_size(beads_comm, &beads_size);
+//  }
+//
+//  if(beads_rank!=-1){
+//    printf("WORLD RANK/SIZE: %d/%d --- PRIME RANK/SIZE: %d/%d\n",
+//      universe->me, universe->nprocs, beads_rank, beads_size);
+//  }
 
 }
 
@@ -770,9 +813,9 @@ void FixPIMD::initial_integrate(int /*vflag*/)
 {
   //CM debug
   //observe_temp_scalar();
-  if(update->ntimestep%100==0){
-    monitor_observable();
-  }
+//  if(update->ntimestep%100==0){
+  monitor_observable();
+//  }
 
   if (pstat_flag && mpchain){
 
@@ -832,8 +875,10 @@ void FixPIMD::initial_integrate(int /*vflag*/)
       compute_press_target();
       //CM
       //this should only be done in proc0 and then broadcast
-      if(universe->me==0) nh_omega_dot();
+      //if(universe->me==0) nh_omega_dot();
+      nh_omega_dot();
       //broadcast
+      //CM do we need this ?could be a redundant communication. 
       MPI_Barrier(universe->uworld);
       MPI_Bcast(omega_dot, 6, MPI_DOUBLE, 0, universe->uworld);
       if (pstyle == TRICLINIC) {
@@ -965,7 +1010,8 @@ void FixPIMD::final_integrate()
 
     //CM
     //this should only be done in proc0 and then broadcast
-    if(universe->me==0) nh_omega_dot();
+    //if(universe->me==0) nh_omega_dot();
+    nh_omega_dot();
     //broadcast
     MPI_Barrier(universe->uworld);
     MPI_Bcast(omega_dot, 6, MPI_DOUBLE, 0, universe->uworld);
@@ -2226,7 +2272,6 @@ void FixPIMD::nh_v_press()
           v[i][2] *= factor[2];
         }
       }
-    }
 
     //CM velocity transformation by eigv
     //EIGV * V
@@ -2958,19 +3003,23 @@ double FixPIMD::compute_temp_scalar()
   double **v = atom->v;
   int *type = atom->type;
   int nlocal = atom->nlocal;
-  double temp;
+  double temp, temp_p;
 
-  temp=0;
+  temp_p=0;
   //CM
   //note that we are using the NM mass!
   for (int i=0; i<nlocal; i++){
-    temp+=mass[type[i]] * (v[i][0]*v[i][0]+v[i][1]*v[i][1]+v[i][2]*v[i][2]);
+    temp_p+=mass[type[i]] * (v[i][0]*v[i][0]+v[i][1]*v[i][1]+v[i][2]*v[i][2]);
   }
-  temp*=force->mvv2e/boltz/nlocal/dimension;
 
 //  if (logfile){
-//    fprintf(logfile,"Temp. of %d mode = "
-//                    "%.4f \n", universe->iworld, temp);}
+//    printf("Temp. of %d mode in partition %d = "
+//                    "%.4f, nlocal: %d \n", universe->iworld, universe->me, temp_p, nlocal);
+//    printf("commnprocs: %d, universenprocess: %d \n", comm->nprocs, universe->nprocs);
+//  }
+
+  MPI_Allreduce(&temp_p,&temp,1,MPI_DOUBLE,MPI_SUM,world);
+  temp*=force->mvv2e/boltz/atom->natoms/dimension;
   
   return temp;
 }
@@ -2982,25 +3031,28 @@ void FixPIMD::compute_temp_vector()
   double **v = atom->v;
   int *type = atom->type;
   int nlocal = atom->nlocal;
+  double t[6];
 
   //init
   for (int idim=0; idim<6; idim++){
-    t_current_vector[idim]=0.0;
+    t[idim]=0.0;
   }
 
   //note that we are using the NM mass!
   for (int i=0; i<nlocal; i++){
-    t_current_vector[0]+=mass[type[i]]*v[i][0]*v[i][0];
-    t_current_vector[1]+=mass[type[i]]*v[i][1]*v[i][1];
-    t_current_vector[2]+=mass[type[i]]*v[i][2]*v[i][2];
+    t[0]+=mass[type[i]]*v[i][0]*v[i][0];
+    t[1]+=mass[type[i]]*v[i][1]*v[i][1];
+    t[2]+=mass[type[i]]*v[i][2]*v[i][2];
 
-    t_current_vector[3]+=mass[type[i]]*v[i][1]*v[i][2];
-    t_current_vector[4]+=mass[type[i]]*v[i][0]*v[i][2];
-    t_current_vector[5]+=mass[type[i]]*v[i][0]*v[i][1];
+    t[3]+=mass[type[i]]*v[i][1]*v[i][2];
+    t[4]+=mass[type[i]]*v[i][0]*v[i][2];
+    t[5]+=mass[type[i]]*v[i][0]*v[i][1];
   }
 
+  MPI_Allreduce(t,t_current_vector,6,MPI_DOUBLE,MPI_SUM,world);
+
   for (int idim=0; idim<6; idim++){
-    t_current_vector[idim]*=force->mvv2e/boltz/nlocal/dimension;
+    t_current_vector[idim]*=force->mvv2e/boltz/atom->natoms/dimension;
   }
 
 //  if (logfile){
@@ -3223,11 +3275,27 @@ void FixPIMD::observe_pe_avg()
 //pimd temperature
 void FixPIMD::observe_temp_scalar() 
 {
-  MPI_Gather(&t_current, 1, MPI_DOUBLE, t_current_beads, 1, MPI_DOUBLE, 0, universe->uworld);
-  if(universe->me==0){
-    t_current_avg=compute_avg(t_current_beads, np);
-  }
-  MPI_Barrier(universe->uworld);
+//  printf("Temp. current: %f --- BEADS RANK/SIZE: %d/%d\n",
+//     t_current, beads_rank, beads_size);
+
+  //beads_comm
+  MPI_Allreduce(&t_current,&t_current_avg,1,MPI_DOUBLE,MPI_SUM,beads_comm);
+
+//  printf("Temp. allreduce: %f --- BEADS RANK/SIZE: %d/%d\n",
+//     t_current_avg, beads_rank, beads_size);
+
+  t_current_avg/=np;
+
+//  if(beads_rank!=-1){
+//    printf("Temp. current/avg: %f/%f --- BEADS RANK/SIZE: %d/%d\n",
+//       t_current, t_current_avg, beads_rank, beads_size);
+//  }
+
+//  MPI_Gather(&t_current, 1, MPI_DOUBLE, t_current_beads, 1, MPI_DOUBLE, 0, universe->uworld);
+//  if(universe->me==0){
+//    t_current_avg=compute_avg(t_current_beads, np);
+//  }
+//  MPI_Barrier(universe->uworld);
 }
 
 //CM
@@ -3239,13 +3307,14 @@ void FixPIMD::monitor_observable()
   //pressure
   double pressure_current = 1.0/3.0 * (p_current[0] + p_current[1] + p_current[2]);
   //etot
-  observe_etot();
-  //E_consv
-  observe_E_consv();
-
+//  observe_etot();
+//  //E_consv
+//  observe_E_consv();
+//
   if(universe->me==0){
     if (pimdfile){
-      fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f\n", update->ntimestep, t_current_avg, vol_current, pressure_current, E_consv, etot/boltz/atom->nlocal, vir_current_avg/boltz/atom->nlocal);
+      //fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f\n", update->ntimestep, t_current_avg, vol_current, pressure_current, E_consv, etot/boltz/atom->nlocal, vir_current_avg/boltz/atom->nlocal);
+      fprintf(pimdfile, "%d    %f    %f    %f   \n", update->ntimestep, t_current_avg, vol_current, pressure_current);
 //      fprintf(pimdfile, "%f    %f    %f \n", eta_E_sum, etap_E_sum, omega_E);
     }
   }
