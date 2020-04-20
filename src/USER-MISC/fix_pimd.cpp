@@ -627,7 +627,6 @@ void FixPIMD::init()
 //  printf("COMM RANK/SIZE: %d/%d \n",
 //    comm->me, comm->nprocs);
 
-
   //CM beads-to-beads MPI Comm
   int color=universe->me%comm->nprocs; 
 
@@ -635,8 +634,15 @@ void FixPIMD::init()
   MPI_Comm_rank(beads_comm, &beads_rank);
   MPI_Comm_size(beads_comm, &beads_size);
 
-  printf("WORLD RANK/SIZE: %d/%d --- PRIME RANK/SIZE: %d/%d\n",
-    universe->me, universe->nprocs, beads_rank, beads_size);
+  printf("UNIVERSE RANK/SIZE: %d/%d --- WORLD i/n: %d/%d --- BEADS RANK/SIZE: %d/%d\n",
+    universe->me, universe->nprocs, universe->iworld, universe->nworlds, beads_rank, beads_size);
+
+  int world_rank, world_size;
+  MPI_Comm_rank(world, &world_rank);
+  MPI_Comm_size(world, &world_size);
+
+  printf("WORLD RANK/SIZE: %d/%d --- BEADS RANK/SIZE: %d/%d\n",
+    world_rank, world_size, beads_rank, beads_size);
 
 //  // Get the group of processes in MPI_COMM_WORLD
 //  MPI_Comm_group(universe->uworld, &world_group);
@@ -875,10 +881,12 @@ void FixPIMD::initial_integrate(int /*vflag*/)
       compute_press_target();
       //CM
       //this should only be done in proc0 and then broadcast
-      //if(universe->me==0) nh_omega_dot();
-      nh_omega_dot();
+      if(universe->me==0) nh_omega_dot();
+      //nh_omega_dot();
+
       //broadcast
       //CM do we need this ?could be a redundant communication. 
+      //CM change it to Allreduce 
       MPI_Barrier(universe->uworld);
       MPI_Bcast(omega_dot, 6, MPI_DOUBLE, 0, universe->uworld);
       if (pstyle == TRICLINIC) {
@@ -890,7 +898,8 @@ void FixPIMD::initial_integrate(int /*vflag*/)
 
       //centroid approx.
       if(method_centroid==REDUCE){
-        if(universe->me==0) nh_omega_dot_x();}
+        //if(universe->me==0) nh_omega_dot_x();}
+        if(universe->iworld==0) nh_omega_dot_x();}
       else if(method_centroid==FULL){
         nh_omega_dot_x();}
 
@@ -898,7 +907,8 @@ void FixPIMD::initial_integrate(int /*vflag*/)
       //reduced centroid eom.
       //if(universe->me==0) nh_v_press();
       if(method_centroid==REDUCE){
-        if(universe->me==0) nh_v_press();
+        //if(universe->me==0) nh_v_press();
+        if(universe->iworld==0) nh_v_press();
       }
       else if(method_centroid==FULL){
         nh_v_press();
@@ -951,7 +961,8 @@ void FixPIMD::final_integrate()
 //      t_current = temperature->compute_scalar();
 
     if(method_centroid==REDUCE){
-      if(universe->me==0) nh_v_press();
+      //if(universe->me==0) nh_v_press();
+      if(universe->iworld==0) nh_v_press();
     }
     else if(method_centroid==FULL){
       nh_v_press();
@@ -1010,8 +1021,8 @@ void FixPIMD::final_integrate()
 
     //CM
     //this should only be done in proc0 and then broadcast
-    //if(universe->me==0) nh_omega_dot();
-    nh_omega_dot();
+    if(universe->me==0) nh_omega_dot();
+    //nh_omega_dot();
     //broadcast
     MPI_Barrier(universe->uworld);
     MPI_Bcast(omega_dot, 6, MPI_DOUBLE, 0, universe->uworld);
@@ -1024,7 +1035,8 @@ void FixPIMD::final_integrate()
 
     if(method_centroid==REDUCE){
       //reduced 
-      if(universe->me==0) nh_omega_dot_x();}
+      //if(universe->me==0) nh_omega_dot_x();}
+      if(universe->iworld==0) nh_omega_dot_x();}
     else if(method_centroid==FULL){
       nh_omega_dot_x();}
 
@@ -1384,6 +1396,7 @@ void FixPIMD::remove_spring_force()
 
 void FixPIMD::spring_force()
 {
+  double spring_E=0.0;
   spring_energy = 0.0;
 
   double **x = atom->x;
@@ -1419,9 +1432,11 @@ void FixPIMD::spring_force()
     f[i][1] -= (dy) * ff;
     f[i][2] -= (dz) * ff;
 
-    spring_energy += fbond * (dx*dx+dy*dy+dz*dz);
+    spring_E += fbond * (dx*dx+dy*dy+dz*dz);
     //spring_energy += (dx*dx+dy*dy+dz*dz);
   }
+  MPI_Allreduce(&spring_E,&spring_energy,1,MPI_DOUBLE,MPI_SUM,world);
+
 }
 
 /* ----------------------------------------------------------------------
@@ -1573,6 +1588,7 @@ void FixPIMD::comm_exec(double **ptr)
     {
       int index = atom->map(tag_send[i]);
 
+//CM this issue should be solved
       if(index<0)
       {
         char error_line[256];
@@ -2088,6 +2104,7 @@ void FixPIMD::nh_omega_dot_x()
 //    printf("eig: %f / %f / %f \n", eig[0], eig[1], eig[2]);
 
   //for full-cell fluctuations
+  //CM is this right? The matrix is one of the whole block by mpi parallelization. 
   else if (pstyle == TRICLINIC) {
     hg_dot[0][0]=omega_dot[0]; 
     hg_dot[1][1]=omega_dot[1]; 
@@ -3080,6 +3097,8 @@ void FixPIMD::observe_etot()
 
 //CM
 //pimd virial avg.
+//need to work on this. 
+//better to keep centroid and others as separate array.
 void FixPIMD::observe_virial_avg() 
 {
 //  double **ff;
@@ -3120,6 +3139,7 @@ void FixPIMD::observe_virial_avg()
   nmpimd_fill(atom->x);
   comm_exec(atom->x);
   nmpimd_transform(buf_beads, atom->x, M_xp2x[universe->iworld]);
+
 //CM broadcast
   MPI_Barrier(universe->uworld);
   for(int i=0; i<atom->nlocal; i++){
@@ -3186,9 +3206,11 @@ void FixPIMD::observe_E_consv()
   //pv
   E_consv+=(p_stop[0]+p_stop[1]+p_stop[2])/3.*vol_current/nktv2p;
   //ke
-  E_consv+=dimension/2.*boltz * np * atom->nlocal * t_current_avg;
+  E_consv+=dimension/2.*boltz * np * atom->natoms * t_current_avg;
   //pe
+  observe_pe_avg();
   E_consv+=pe_current_avg;
+  //spring
   observe_spring_energy_sum();
   E_consv+=spring_energy_sum;
   //thermostat energy
@@ -3226,36 +3248,43 @@ void FixPIMD::observe_eta_E_sum()
   int nmax = 3 * atom->nlocal;  //d*N d.o.f
   int *type = atom->type;
   double t_target=nhc_temp;
+  double eta_E_p=0.0; 
 
-  eta_E=0.0;
   for(int ip=0; ip<nmax; ip++)
   {
     int iatm = ip/3;
     int idim = ip%3;
     for (int ich=0; ich<mtchain; ich++){
       //kinetic
-      eta_E+= 0.5*eta_mass[ip][ich]*eta_dot[ip][ich]*eta_dot[ip][ich]; // *force->mvv2e;
+      eta_E_p+= 0.5*eta_mass[ip][ich]*eta_dot[ip][ich]*eta_dot[ip][ich]; // *force->mvv2e;
       //eta term
-      eta_E+= boltz*t_target*eta[ip][ich];
+      eta_E_p+= boltz*t_target*eta[ip][ich];
     }
   }
-  //gather eat_E
-  MPI_Gather(&eta_E, 1, MPI_DOUBLE, eta_E_beads, 1, MPI_DOUBLE, 0, universe->uworld);
-  if(universe->me==0){
-    eta_E_sum=compute_sum(eta_E_beads, np);
-  }
-  MPI_Barrier(universe->uworld);
+  //sum nlocal 
+  MPI_Allreduce(&eta_E_p,&eta_E,1,MPI_DOUBLE,MPI_SUM,world);
+  //sum over beads
+  MPI_Allreduce(&eta_E,&eta_E_sum,1,MPI_DOUBLE,MPI_SUM,beads_comm);
+
+//  //gather eat_E
+//  MPI_Gather(&eta_E, 1, MPI_DOUBLE, eta_E_beads, 1, MPI_DOUBLE, 0, universe->uworld);
+//  if(universe->me==0){
+//    eta_E_sum=compute_sum(eta_E_beads, np);
+//  }
+//  MPI_Barrier(universe->uworld);
 }
 
 void FixPIMD::observe_spring_energy_sum()
 {
   spring_energy_sum=0;
-  //gather spring energy 
-  MPI_Gather(&spring_energy, 1, MPI_DOUBLE, spring_energy_beads, 1, MPI_DOUBLE, 0, universe->uworld);
-  if(universe->me==0){
-    spring_energy_sum=compute_avg(spring_energy_beads, np);
-  }
-  MPI_Barrier(universe->uworld);
+  MPI_Allreduce(&spring_energy,&spring_energy_sum,1,MPI_DOUBLE,MPI_SUM,beads_comm);
+
+//  //gather spring energy 
+//  MPI_Gather(&spring_energy, 1, MPI_DOUBLE, spring_energy_beads, 1, MPI_DOUBLE, 0, universe->uworld);
+//  if(universe->me==0){
+//    spring_energy_sum=compute_avg(spring_energy_beads, np);
+//  }
+//  MPI_Barrier(universe->uworld);
 }
 
 //CM
@@ -3263,12 +3292,16 @@ void FixPIMD::observe_spring_energy_sum()
 void FixPIMD::observe_pe_avg() 
 {
   pe_current=pe->compute_scalar();
-  //gather and average pe
-  MPI_Gather(&pe_current, 1, MPI_DOUBLE, pe_current_beads, 1, MPI_DOUBLE, 0, universe->uworld);
-  if(universe->me==0){
-    pe_current_avg=compute_avg(pe_current_beads, np);
-  }
-  MPI_Barrier(universe->uworld);
+
+  MPI_Allreduce(&pe_current,&pe_current_avg,1,MPI_DOUBLE,MPI_SUM,beads_comm);
+  pe_current_avg/=np;
+
+//  //gather and average pe
+//  MPI_Gather(&pe_current, 1, MPI_DOUBLE, pe_current_beads, 1, MPI_DOUBLE, 0, universe->uworld);
+//  if(universe->me==0){
+//    pe_current_avg=compute_avg(pe_current_beads, np);
+//  }
+//  MPI_Barrier(universe->uworld);
 }
 
 //CM 
@@ -3306,15 +3339,15 @@ void FixPIMD::monitor_observable()
   observe_temp_scalar();
   //pressure
   double pressure_current = 1.0/3.0 * (p_current[0] + p_current[1] + p_current[2]);
-  //etot
+//  //etot
 //  observe_etot();
-//  //E_consv
-//  observe_E_consv();
-//
+  //E_consv
+  observe_E_consv();
+
   if(universe->me==0){
     if (pimdfile){
-      //fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f\n", update->ntimestep, t_current_avg, vol_current, pressure_current, E_consv, etot/boltz/atom->nlocal, vir_current_avg/boltz/atom->nlocal);
-      fprintf(pimdfile, "%d    %f    %f    %f   \n", update->ntimestep, t_current_avg, vol_current, pressure_current);
+      //fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f\n", update->ntimestep, t_current_avg, vol_current, pressure_current, E_consv, etot/boltz/atom->natoms, vir_current_avg/boltz/atom->natoms);
+      fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    \n", update->ntimestep, t_current_avg, vol_current, pressure_current, pe_current_avg, E_consv);
 //      fprintf(pimdfile, "%f    %f    %f \n", eta_E_sum, etap_E_sum, omega_E);
     }
   }
@@ -3370,18 +3403,19 @@ void FixPIMD::compute_pressure_scalar()
 //      if(universe->me==7)
 //        printf("position0: %f %f %f \n", atom->x[150][0],atom->x[150][1],atom->x[150][2]);
   
-      nmpimd_fill(atom->x);
-      comm_exec(atom->x);
-      nmpimd_transform(buf_beads, atom->x, M_x2xp[universe->iworld]);
+//Does this affect the pressure calculation?
+//      nmpimd_fill(atom->x);
+//      comm_exec(atom->x);
+//      nmpimd_transform(buf_beads, atom->x, M_x2xp[universe->iworld]);
   
 //      if(universe->me==7)
 //        printf("position1: %f %f %f \n", atom->x[150][0],atom->x[150][1],atom->x[150][2]);
   
       pressure->compute_scalar();
 
-      nmpimd_fill(atom->x);
-      comm_exec(atom->x);
-      nmpimd_transform(buf_beads, atom->x, M_xp2x[universe->iworld]);
+//      nmpimd_fill(atom->x);
+//      comm_exec(atom->x);
+//      nmpimd_transform(buf_beads, atom->x, M_xp2x[universe->iworld]);
 
 //      if(universe->me==7)
 //        printf("position0: %f %f %f \n", atom->x[150][0],atom->x[150][1],atom->x[150][2]);
@@ -3396,16 +3430,16 @@ void FixPIMD::compute_pressure_vector()
   //CM compute the pressure in NM coordinates
   if(method==CMD || method==NMPIMD)
   {
-      nmpimd_fill(atom->x);
-      comm_exec(atom->x);
+//      nmpimd_fill(atom->x);
+//      comm_exec(atom->x);
 
-      nmpimd_transform(buf_beads, atom->x, M_x2xp[universe->iworld]);
+//      nmpimd_transform(buf_beads, atom->x, M_x2xp[universe->iworld]);
       pressure->compute_vector();
   
-      nmpimd_fill(atom->x);
-      comm_exec(atom->x);
+//      nmpimd_fill(atom->x);
+///      comm_exec(atom->x);
 
-      nmpimd_transform(buf_beads, atom->x, M_xp2x[universe->iworld]);
+//      nmpimd_transform(buf_beads, atom->x, M_xp2x[universe->iworld]);
   }
   else{
     pressure->compute_vector();}
