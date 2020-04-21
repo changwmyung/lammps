@@ -22,26 +22,33 @@
 ------------------------------------------------------------------------- */
 
 /* ----------------------------------------------------------------------
-   Copyright	Parrinello Group @ ETHZ & USI, Switzerland
+   Copyright	Parrinello Group @ ETH Zurich & USI, Lugano, Switzerland
    Authors 	Chang Woo Myung & Barak Hirshberg
    Updated	March, 2020
    Version 	2.0
    Features	* PIMD NPT Parrinello-Rahman barostat(including isotropic & full cell fluctuations) [2].
+                * Bosonic Exchange PIMD (pimdb) PNAS (2019) [3].
 
-   Next Feat.	* Bosonic Exchange PIMD (pimdb) PNAS (2019)
-   		* Perturbed PIMD
+   Next Feat.	* Fermionic Exchange PIMD (pimdf) (2020) [4].
+   		* Perturbed PIMD [5].
       		* PIMD enhanced sampling
 
    REF
-   [1] Martyna, Tuckerman, Tobias & Klein, Molecular Physics 87 1117 (1996) 
-   [2] Martyna, Hughes, & Tuckerman, J. Chem. Phys. 110 3275 (1999) 
+   [1] Martyna, Tuckerman, Tobias & Klein, Molecular Physics 87 1117 (1996).
+   [2] Martyna, Hughes, & Tuckerman, J. Chem. Phys. 110 3275 (1999).
+   [3] Hirshberg, Rizzi, & Parrinello PNAS 116 21445 (2019).
 ------------------------------------------------------------------------- */
 
+#include <cmath>
 #include "fix_pimd.h"
 #include <mpi.h>
-#include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <chrono>
+#include <iostream>
+#include <fstream>
+#include <algorithm>
+
 #include "universe.h"
 #include "comm.h"
 #include "force.h"
@@ -78,6 +85,7 @@ enum{PIMD,NMPIMD,CMD};
 enum{NONE,XYZ,XY,YZ,XZ};
 enum{ISO,ANISO,TRICLINIC};
 enum{REDUCE,FULL};
+enum{BOLTZMANN,BOSON,FERMION};
 
 //CM diagonalization routine
 // Constants
@@ -91,12 +99,14 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
 {
   method     = PIMD;
   method_centroid = FULL;
+  method_statistics = BOLTZMANN;
   fmass      = 1.0;
   nhc_temp   = 298.15;
   nhc_nchain = 2;
   sp         = 1.0;
   //CM
   boltz = force->boltz;
+  sEl=0.5;
 
   pe = NULL;
 
@@ -208,6 +218,21 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
     else if (strcmp(arg[i],"reduce") == 0) {
       method_centroid=REDUCE;
     }
+
+    else if (strcmp(arg[i],"boson") == 0) {
+      method_statistics=BOSON;
+    }
+
+    else if (strcmp(arg[i],"fermion") == 0) {
+      method_statistics=FERMION;
+    }
+
+    else if(strcmp(arg[i],"sEl")==0)
+    {
+      sEl = atof(arg[i+1]);
+      if(sEl<0.0) error->universe_all(FLERR,"Invalid sEl value for fix pimd. The scaling of Elongest should be positive.");
+    }
+
     //else error->universe_all(arg[i],i+1,"Unkown keyword for fix pimd");
   }
 
@@ -668,6 +693,15 @@ void FixPIMD::init()
 //      universe->me, universe->nprocs, beads_rank, beads_size);
 //  }
 
+  //BOSON
+  if(method_statistics==BOSON)
+    if(universe->me==0)
+      printf("Particles are bosonic!\n");
+
+  E_kn=std::vector<double>((atom->natoms * (atom->natoms + 1) / 2),0.0);
+  V=std::vector<double>((atom->natoms + 1),0.0);
+  save_E_kn=std::vector<double>((atom->natoms*(atom->natoms+1)/2),0.0);
+  dV=std::vector<std::vector<double>>(atom->natoms*universe->nworlds, std::vector<double>(3, 0.0));
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1396,46 +1430,58 @@ void FixPIMD::remove_spring_force()
 
 void FixPIMD::spring_force()
 {
-  double spring_E=0.0;
-  spring_energy = 0.0;
-
-  double **x = atom->x;
-  double **f = atom->f;
-  double* _mass = atom->mass;
-  int* type = atom->type;
-  int nlocal = atom->nlocal;
-
-  double* xlast = buf_beads[x_last];
-  double* xnext = buf_beads[x_next];
-
-  for(int i=0; i<nlocal; i++)
-  {
-    double delx1 = xlast[0] - x[i][0];
-    double dely1 = xlast[1] - x[i][1];
-    double delz1 = xlast[2] - x[i][2];
-    xlast += 3;
-    domain->minimum_image(delx1, dely1, delz1);
-
-    double delx2 = xnext[0] - x[i][0];
-    double dely2 = xnext[1] - x[i][1];
-    double delz2 = xnext[2] - x[i][2];
-    xnext += 3;
-    domain->minimum_image(delx2, dely2, delz2);
-
-    double ff = fbond * _mass[type[i]];
-
-    double dx = delx1+delx2;
-    double dy = dely1+dely2;
-    double dz = delz1+delz2;
-
-    f[i][0] -= (dx) * ff;
-    f[i][1] -= (dy) * ff;
-    f[i][2] -= (dz) * ff;
-
-    spring_E += fbond * (dx*dx+dy*dy+dz*dz);
-    //spring_energy += (dx*dx+dy*dy+dz*dz);
+  if(method_statistics==BOLTZMANN){
+    int nlocal = atom->nlocal;
+    double spring_E=0.0;
+    spring_energy = 0.0;
+  
+    double **x = atom->x;
+    double **f = atom->f;
+    double* _mass = atom->mass;
+    int* type = atom->type;
+  
+    double* xlast = buf_beads[x_last];
+    double* xnext = buf_beads[x_next];
+  
+    for(int i=0; i<nlocal; i++)
+    {
+      double delx1 = xlast[0] - x[i][0];
+      double dely1 = xlast[1] - x[i][1];
+      double delz1 = xlast[2] - x[i][2];
+      xlast += 3;
+      domain->minimum_image(delx1, dely1, delz1);
+  
+      double delx2 = xnext[0] - x[i][0];
+      double dely2 = xnext[1] - x[i][1];
+      double delz2 = xnext[2] - x[i][2];
+      xnext += 3;
+      domain->minimum_image(delx2, dely2, delz2);
+  
+      double ff = fbond * _mass[type[i]];
+  
+      double dx = delx1+delx2;
+      double dy = dely1+dely2;
+      double dz = delz1+delz2;
+  
+      f[i][0] -= (dx) * ff;
+      f[i][1] -= (dy) * ff;
+      f[i][2] -= (dz) * ff;
+  
+      spring_E += fbond * (dx*dx+dy*dy+dz*dz);
+      //spring_energy += (dx*dx+dy*dy+dz*dz);
+    }
+    MPI_Allreduce(&spring_E,&spring_energy,1,MPI_DOUBLE,MPI_SUM,world);
   }
-  MPI_Allreduce(&spring_E,&spring_energy,1,MPI_DOUBLE,MPI_SUM,world);
+  else if(method_statistics==BOSON){ 
+    V.at(0) = 0.0;
+    //energy
+    E_kn = Evaluate_VBn(V, atom->natoms);
+    //force
+    dV = Evaluate_dVBn(V,E_kn,atom->natoms);
+  }
+  else if(method_statistics==FERMION){
+
+  }
 
 }
 
@@ -3935,3 +3981,326 @@ double FixPIMD::compute_scalar()
   return energy;
 }
 */
+
+
+
+/*
+
+Particle symmetry: Boson
+
+*/
+
+std::vector<double> FixPIMD::Evaluate_VBn(std::vector <double>& V, const int n)
+{
+  double sig_denom;
+  double Elongest;
+  double E_kn;
+  double beta   = 1.0 / (boltz * nhc_temp);
+
+  int count = 0;
+  for (int m = 1; m < n+1; ++m) {
+    sig_denom = 0.0;
+    Elongest=0.0;
+    for (int k = m; k > 0; --k) {
+      E_kn = Evaluate_Ekn(m,k);
+      save_E_kn.at(count) = E_kn;
+      if(k==m){
+        //!BH! I had to add 0.5 below in order to not get sigma which is zero or inf for large systems
+        //CM larger system -> smaller scaling?
+        Elongest = sEl*E_kn;
+        //Elongest = sEl*(E_kn+V.at(m-k));
+        //Elongest = E_kn;
+        //Elongest = 0.5*E_kn;
+        //Elongest = 100.0; //sEl*(std::max(E_kn,V.at(m-1)));
+        //if (universe->me ==0)
+        //  printf("Elongest/sEl: %f, %f \n", Elongest, sEl);
+      }
+
+      sig_denom += exp(-beta*(E_kn + V.at(m-k)-Elongest));
+
+      //if(std::isnan(sig_denom) || std::isinf(sig_denom)) {
+      //  if (universe->me ==0){
+      //    printf("E_kn(%d,%d): %f, sig_denom: %f \n", m, k, E_kn, sig_denom);}
+          //std::cout << "m is: "<<m << " k is: " <<k << " E_kn is: " << E_kn << " V.at(m-k) is: " << V.at(m - k) << " Elongest is: " << Elongest
+          //          << " V.at(m-1) is " <<V.at(m-1)<< " beta is: " << beta << " sig_denom is: " <<sig_denom << std::endl ;}
+      //}
+      count++;
+    }
+
+    V.at(m) = Elongest-1.0/beta*log(sig_denom / (double)m);
+    //if (universe->me ==0)
+    //  printf("V.at(%d): %f \n", m, V.at(m));
+
+    if(std::isinf(V.at(m)) || std::isnan(V.at(m))) {
+	if (universe->me ==0){
+          std::cout << "sig_denom is: " << sig_denom << " Elongest is: " << Elongest
+                    << std::endl;}
+          exit(0);
+    }
+    //std::cout<< sig_denom << " " <<  log (sig_denom / (double)m) << " " << beta <<std::endl;
+  }
+  return save_E_kn;
+}
+
+//E_n^(k) is a function of k atoms (R_n-k+1,...,R_n) for a given n and k.
+double FixPIMD::Evaluate_Ekn(const int n, const int k)
+{
+  //bead is the bead number of current replica. bead = 0,...,np-1.
+  int bead = universe->iworld;
+
+  double **x = atom->x;
+  double* _mass = atom->mass;
+  int* type = atom->type;
+  int nlocal = atom->nlocal;
+
+  //xnext is a pointer to first element of buf_beads[x_next].
+  //See in FixPIMDB::comm_init() for the definition of x_next.
+  //x_next is basically (bead + 1) for bead in (0,...,np-2) and 0 for bead = np-1.
+  //buf_beads[j] is a 1-D array of length 3*nlocal x0^j,y0^j,z0^j,...,x_(nlocal-1)^j,y_(nlocal-1)^j,z_(nlocal-1)^j.
+  double* xnext = buf_beads[x_next];
+
+  //omega^2, could use fbond instead?
+  double omega_sq = omega_np*omega_np;
+
+  //E_n^(k)(R_n-k+1,...,R_n) is a function of k atoms
+  xnext += 3*(n-k);
+
+  //np is total number of beads
+  if(bead == np-1 && k > 1) xnext += 3;
+
+  spring_energy = 0.0;
+  for (int i = n-k; i < n ; ++i) {
+
+    /*if(bead==3 && n==2 && k==2) {
+        std::cout << "atom " << i + 1 << ", bead" << bead + 1 << ": " << x[i][0] << " " << x[i][1] << " " << x[i][2]
+                  << std::endl;
+        std::cout << "next " << i + 1 << ", bead" << bead + 1 << ": " << xnext[0] << " " << xnext[1] << " " << xnext[2]
+                  << std::endl;
+    }*/
+
+    double delx = xnext[0] - x[i][0];
+    //std::cout<<  xnext[0] << std::endl;
+    double dely = xnext[1] - x[i][1];
+    double delz = xnext[2] - x[i][2];
+
+    domain->minimum_image(delx, dely, delz);
+
+    if (bead == np - 1 && i == n - 2) {
+      /*if(bead==3 && n==2 && k==2) {
+          std::cout<<"I AM HERE"<<std::endl;
+          std::cout << "next " << i + 1 << ", bead" << bead + 1 << ": " << xnext[0] << " " << xnext[1] << " " << xnext[2]
+                    << std::endl;
+      }*/
+      xnext = buf_beads[x_next];
+
+      /*if(bead==3 && n==2 && k==2) {
+          std::cout<<"NOW I AM HERE"<<std::endl;
+          std::cout << "next " << i + 1 << ", bead" << bead + 1 << ": " << xnext[0] << " " << xnext[1] << " " << xnext[2]
+                    << std::endl;
+      }*/
+      //std::cout<<bead<<std::endl;
+      //std::cout<<  xnext[0] << " " << xnext[1]<< " " << xnext[2] << std::endl;
+
+      xnext += 3*(n - k);
+    } else xnext += 3;
+
+    //std::cout << delx << " " <<dely << " " <<  delz << std::endl;
+    //std::cout << _mass[type[i]] << " " << omega_sq << " " <<  delx*delx << std::endl;
+    spring_energy += 0.5*_mass[type[i]]*omega_sq*(delx*delx + dely*dely + delz*delz);
+
+  }
+
+  double energy_all = 0.0;
+  double energy_local = spring_energy;
+  //double energy_local = 0.0;
+  //if(bead==0 && n==2 && k==2)
+      //std::cout<< universe->iworld << " " << spring_energy <<" " << energy_all <<std::endl;
+
+  //MPI_Allreduce(&spring_energy,&energy_local,1,MPI_DOUBLE,MPI_SUM,world);
+  //MPI_Allreduce(&energy_local,&energy_all,1,MPI_DOUBLE,MPI_SUM,universe->uworld);
+  MPI_Allreduce(MPI_IN_PLACE,&energy_local,1,MPI_DOUBLE,MPI_SUM,universe->uworld);
+  if(std::isnan(spring_energy) || std::isnan(energy_all)){
+    std::cout<< universe->iworld << " " << spring_energy <<" " << energy_all <<std::endl;
+    exit(0);}
+
+  //return energy_all;
+  return energy_local;
+}
+
+std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn(const std::vector<double> &V, const std::vector<double> &save_E_kn, const int n) 
+{
+  double beta = 1.0 / (boltz * nhc_temp);
+  int bead = universe->iworld;
+  double **f = atom->f;
+  int nlocal = atom->nlocal;
+
+  std::vector<std::vector<double>> dV_all(n, std::vector<double>(3,0.0));
+  //std::cout<<dV_all.at(0).size()<<std::endl;
+
+  for (int atomnum = 0; atomnum < nlocal; ++atomnum) {
+
+      std::vector<std::vector<double>> dV(n+1, std::vector<double>(3,0.0));
+      dV.at(0) = {0.0,0.0,0.0};
+
+      for (int m = 1; m < n + 1; ++m) {
+
+        std::vector<double> sig(3,0.0);
+
+        if (atomnum > m-1) {
+          dV.at(m) = {0.0,0.0,0.0};
+        }else{
+
+          //for (int k = 1; k < m + 1; ++k) {
+          int count = m*(m-1)/2;
+
+	  //!BH! I had to add 0.5 below in order to not get sigma which is zero or inf for large systems
+          double Elongest = sEl*(save_E_kn.at(m*(m-1)/2)+V.at(m-1));
+	  //double Elongest = save_E_kn.at(m*(m-1)/2);
+          //std::cout<<"Elongest: "<<Elongest<<std::endl;
+
+            for (int k = m; k > 0; --k) {
+                std::vector<double> dE_kn(3,0.0);
+
+                dE_kn = Evaluate_dEkn_on_atom(m,k,atomnum);
+                /*
+                if(bead==0 && atomnum==1) {
+                    std::cout << "m: " << m <<  " k: " << k <<" Ekn:" << save_E_kn.at(count)* 2625.499638
+                            <<" V_k-m:" << V.at(m - k)* 2625.499638 << std::endl;
+                }*/
+
+                sig.at(0) += (dE_kn.at(0) + dV.at(m - k).at(0)) * exp(-beta * (save_E_kn.at(count) + V.at(m - k)-Elongest));
+                sig.at(1) += (dE_kn.at(1) + dV.at(m - k).at(1)) * exp(-beta * (save_E_kn.at(count) + V.at(m - k)-Elongest));
+                sig.at(2) += (dE_kn.at(2) + dV.at(m - k).at(2)) * exp(-beta * (save_E_kn.at(count) + V.at(m - k)-Elongest));
+
+                count++;
+
+            }
+
+            double  sig_denom_m = (double)m*exp(-beta*(V.at(m)-Elongest));
+	    if(sig_denom_m ==0 || std::isnan(sig_denom_m) || std::isinf(sig_denom_m) || std::isnan(sig.at(0)) || std::isinf(sig.at(0))) {
+	      if (universe->iworld ==0){
+		std::cout << "m is: "<< m << " Elongest is: " << Elongest << " V.at(m-1) is " <<V.at(m-1)<< " beta is: " << beta << " sig_denom_m is: " <<sig_denom_m << std::endl;
+	      }
+	    }
+
+            //std::cout<<m<<" "<<beta<<" "<<V.at(m)<<std::endl;
+            //std::cout<<"sig[0] is: " <<sig.at(0)<<" sig_denom_m is: "<<sig_denom_m<<std::endl;
+            dV.at(m).at(0) = sig.at(0) / sig_denom_m;
+            dV.at(m).at(1) = sig.at(1) / sig_denom_m;
+            dV.at(m).at(2) = sig.at(2) / sig_denom_m;
+
+	    if(std::isinf(dV.at(m).at(0)) || std::isnan(dV.at(m).at(0))) {
+	      if (universe->iworld ==0){
+		std::cout << "sig_denom_m is: " << sig_denom_m << " Elongest is: " << Elongest
+			  << " V.at(m) is " << V.at(m) << " beta is " << beta << std::endl;}
+	      exit(0);
+	    }
+        }
+      }
+
+      /*if(bead==0 &&atomnum==0)
+          std::cout <<"atom: " << atomnum+1 <<" bead: "<< bead+1 << " dV: " << dV.at(n).at(0)<<" "<< dV.at(n).at(1)<< " "<<dV.at(n).at(2) <<std::endl;
+      */
+
+      //std::cout<<"index: " <<(atomnum)*np + (bead)<<std::endl;
+      dV_all.at((atomnum)).at(0) = dV.at(n).at(0);
+      dV_all.at((atomnum)).at(1) = dV.at(n).at(1);
+      dV_all.at((atomnum)).at(2) = dV.at(n).at(2);
+
+      /*if(bead==0)
+          std::cout <<"atom: " << atomnum+1 <<" bead: "<< bead+1 << " fbefore: " << f[atomnum][0]<<" "<< f[atomnum][1]<< " "<<f[atomnum][2] <<std::endl;
+      */
+
+      f[atomnum][0] -= dV.at(n).at(0);
+      f[atomnum][1] -= dV.at(n).at(1);
+      f[atomnum][2] -= dV.at(n).at(2);
+
+      /*if(bead==0)
+          std::cout <<"atom: " << atomnum+1 <<" bead: "<< bead+1 << " fafter: " << f[atomnum][0]<<" "<< f[atomnum][1]<< " "<<f[atomnum][2] <<std::endl;
+        */
+  }
+  return dV_all;
+}
+
+//dE_n^(k) is a function of k atoms (R_n-k+1,...,R_n) for a given n and k.
+std::vector<double> FixPIMD::Evaluate_dEkn_on_atom(const int n, const int k, const int atomnum)
+{
+  //dE_n^(k)(R_n-k+1,...,R_n) is a function of k atoms
+  if (atomnum < n-k or atomnum > n-1 ) { return std::vector<double>(3, 0.0); }
+  else {
+
+    //bead is the bead number of current replica. bead = 0,...,np-1.
+    int bead = universe->iworld;
+
+    double **x = atom->x;
+    double *_mass = atom->mass;
+    int *type = atom->type;
+    int nlocal = atom->nlocal;
+
+    //xnext is a pointer to first element of buf_beads[x_next].
+    //See in FixPIMDB::comm_init() for the definition of x_next.
+    //x_next is basically (bead + 1) for bead in (0,...,np-2) and 0 for bead = np-1.
+    //buf_beads[j] is a 1-D array of length 3*nlocal x0^j,y0^j,z0^j,...,x_(nlocal-1)^j,y_(nlocal-1)^j,z_(nlocal-1)^j.
+    double *xnext = buf_beads[x_next];
+    double *xlast = buf_beads[x_last];
+
+    //omega^2, could use fbond instead?
+    double omega_sq = omega_np * omega_np;
+
+    //dE_n^(k)(R_n-k+1,...,R_n) is a function of k atoms
+    //But derivative if for atom atomnum
+    xnext += 3 * (atomnum);
+    xlast += 3 * (atomnum);
+
+    //np is total number of beads
+    if (bead == np - 1 && k > 1){
+      atomnum == n - 1 ? (xnext-= 3*(k - 1)) : (xnext += 3);
+    }
+
+    if (bead == 0 && k > 1){
+      atomnum == n-k ? (xlast+= 3*(k - 1)) : (xlast -= 3);
+    }
+
+    //if (bead == np - 1 && k > 1) xnext += 3;
+    //if (bead == 0 && k > 1) xlast -= 3;
+
+    /*
+    if(bead==3 && n==1 && k==1) {
+      std::cout << "atom " << atomnum + 1 << ", bead" << bead + 1 << ": " << x[atomnum][0] << " " << x[atomnum][1] << " " << x[atomnum][2]
+                << std::endl;
+      std::cout << "next " << atomnum + 1 << ", bead" << bead + 1 << ": " << xnext[0] << " " << xnext[1] << " " << xnext[2]
+                << std::endl;
+    }*/
+
+    std::vector<double> res(3);
+/*
+    std::cout<< "atom " << atomnum+1 << ", bead" << bead + 1 << ": " << x[atomnum][0] << " " << x[atomnum][1] << " " << x[atomnum][2] << std::endl;
+    std::cout<< "next " << atomnum+1 << ", bead" << bead + 1 << ": " << xnext[0] << " " << xnext[1] << " " << xnext[2] << std::endl;
+    std::cout<< "last " << atomnum+1 << ", bead" << bead + 1 << ": " << xlast[0] << " " << xlast[1] << " " << xlast[2] << std::endl;
+*/
+    double delx1 = xnext[0] - x[atomnum][0];
+    double dely1 = xnext[1] - x[atomnum][1];
+    double delz1 = xnext[2] - x[atomnum][2];
+    domain->minimum_image(delx1, dely1, delz1);
+
+    double delx2 = xlast[0] - x[atomnum][0];
+    //std::cout<<  xnext[0] << std::endl;
+    double dely2 = xlast[1] - x[atomnum][1];
+    double delz2 = xlast[2] - x[atomnum][2];
+    domain->minimum_image(delx2, dely2, delz2);
+
+    double dx = -1.0*(delx1 + delx2);
+    double dy = -1.0*(dely1 + dely2);
+    double dz = -1.0*(delz1 + delz2);
+
+    //std::cout << delx << " " <<dely << " " <<  delz << std::endl;
+    //std::cout << _mass[type[i]] << " " << omega_sq << " " <<  delx*delx << std::endl;
+    res.at(0) = _mass[type[atomnum]] * omega_sq * dx;
+    res.at(1) = _mass[type[atomnum]] * omega_sq * dy;
+    res.at(2) = _mass[type[atomnum]] * omega_sq * dz;
+
+    //std::cout << bead << ": " << res.at(0) << " " << res.at(1) << " " << res.at(2) << std::endl;
+
+    return res;
+  }
+}

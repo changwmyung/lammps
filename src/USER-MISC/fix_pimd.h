@@ -21,6 +21,7 @@ FixStyle(pimd,FixPIMD)
 #define FIX_PIMD_H
 
 #include "fix.h"
+#include <vector>
 
 namespace LAMMPS_NS {
 
@@ -55,6 +56,8 @@ class FixPIMD : public Fix {
   double inverse_np;
   //CM centroid approx. for barostat
   int method_centroid;
+  //CM particle symmetry
+  int method_statistics;
 
   /* ring-polymer model */
 
@@ -282,9 +285,20 @@ class FixPIMD : public Fix {
   //CM output file 
   FILE *pimdfile;  // pimd log file
 
+  //BOSONIC PIMD
+  double sEl;
+  std::vector<double> E_kn;
+  std::vector<double> V;
+  std::vector<double> save_E_kn;
+  std::vector<std::vector<double>> dV;
+
+  double Evaluate_Ekn(const int n, const int k);
+  std::vector<double> Evaluate_VBn(std::vector <double>& V, const int n);
+  std::vector<double> Evaluate_dEkn_on_atom(const int n, const int k, const int atomnum);
+  std::vector<std::vector<double>> Evaluate_dVBn(const std::vector <double>& V, const std::vector <double>& save_E_kn, const int n);
+
  protected:
   int dimension, which;
-
 
 };
 
