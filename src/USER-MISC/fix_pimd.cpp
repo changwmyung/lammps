@@ -4004,26 +4004,25 @@ std::vector<double> FixPIMD::Evaluate_VBn(std::vector <double>& V, const int n)
     for (int k = m; k > 0; --k) {
       E_kn = Evaluate_Ekn(m,k);
       save_E_kn.at(count) = E_kn;
-      if(k==m){
+      if(k==1){
         //!BH! I had to add 0.5 below in order to not get sigma which is zero or inf for large systems
-        //CM larger system -> smaller scaling?
-        Elongest = sEl*E_kn;
-        //Elongest = sEl*(E_kn+V.at(m-k));
+        //CM we choose the maximum value (-\beta*E)
+        //Elongest = sEl*E_kn;
+        Elongest = sEl*(E_kn+V.at(m-k));
         //Elongest = E_kn;
         //Elongest = 0.5*E_kn;
         //Elongest = 100.0; //sEl*(std::max(E_kn,V.at(m-1)));
         //if (universe->me ==0)
         //  printf("Elongest/sEl: %f, %f \n", Elongest, sEl);
       }
-
       sig_denom += exp(-beta*(E_kn + V.at(m-k)-Elongest));
 
-      //if(std::isnan(sig_denom) || std::isinf(sig_denom)) {
-      //  if (universe->me ==0){
-      //    printf("E_kn(%d,%d): %f, sig_denom: %f \n", m, k, E_kn, sig_denom);}
-          //std::cout << "m is: "<<m << " k is: " <<k << " E_kn is: " << E_kn << " V.at(m-k) is: " << V.at(m - k) << " Elongest is: " << Elongest
-          //          << " V.at(m-1) is " <<V.at(m-1)<< " beta is: " << beta << " sig_denom is: " <<sig_denom << std::endl ;}
-      //}
+      if(std::isnan(sig_denom) || std::isinf(sig_denom)) {
+        if (universe->me ==0){
+          printf("E_kn(%d,%d): %f, sig_denom: %f \n", m, k, E_kn, sig_denom);}
+        //std::cout << "m is: "<<m << " k is: " <<k << " E_kn is: " << E_kn << " V.at(m-k) is: " << V.at(m - k) << " Elongest is: " << Elongest
+        //          << " V.at(m-1) is " <<V.at(m-1)<< " beta is: " << beta << " sig_denom is: " <<sig_denom << std::endl ;}
+      }
       count++;
     }
 
@@ -4133,6 +4132,13 @@ std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn(const std::vector<double>
   int bead = universe->iworld;
   double **f = atom->f;
   int nlocal = atom->nlocal;
+  double sig_denom_m;
+  int beta_n; //partitioning beta for the low temp. limit
+  int beta_grid=10; //beat grid
+  
+  beta_n=(int)beta/beta_grid+1;
+  if (universe->me ==0)
+    printf("beta: %d, beta_n: %d \n", (int)beta, beta_n);
 
   std::vector<std::vector<double>> dV_all(n, std::vector<double>(3,0.0));
   //std::cout<<dV_all.at(0).size()<<std::endl;
@@ -4154,45 +4160,51 @@ std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn(const std::vector<double>
           int count = m*(m-1)/2;
 
 	  //!BH! I had to add 0.5 below in order to not get sigma which is zero or inf for large systems
-          double Elongest = sEl*(save_E_kn.at(m*(m-1)/2)+V.at(m-1));
+          //double Elongest = sEl*(save_E_kn.at(m*(m-1)/2)+V.at(m-1));
+          double Elongest = 0.5*(save_E_kn.at(0)+V.at(0)+V.at(m));
 	  //double Elongest = save_E_kn.at(m*(m-1)/2);
           //std::cout<<"Elongest: "<<Elongest<<std::endl;
 
             for (int k = m; k > 0; --k) {
                 std::vector<double> dE_kn(3,0.0);
-
                 dE_kn = Evaluate_dEkn_on_atom(m,k,atomnum);
-                /*
-                if(bead==0 && atomnum==1) {
-                    std::cout << "m: " << m <<  " k: " << k <<" Ekn:" << save_E_kn.at(count)* 2625.499638
-                            <<" V_k-m:" << V.at(m - k)* 2625.499638 << std::endl;
-                }*/
 
-                sig.at(0) += (dE_kn.at(0) + dV.at(m - k).at(0)) * exp(-beta * (save_E_kn.at(count) + V.at(m - k)-Elongest));
-                sig.at(1) += (dE_kn.at(1) + dV.at(m - k).at(1)) * exp(-beta * (save_E_kn.at(count) + V.at(m - k)-Elongest));
-                sig.at(2) += (dE_kn.at(2) + dV.at(m - k).at(2)) * exp(-beta * (save_E_kn.at(count) + V.at(m - k)-Elongest));
+                sig.at(0) += (dE_kn.at(0) + dV.at(m - k).at(0)) * exp(-beta * (save_E_kn.at(count) + V.at(m - k)));
+                sig.at(1) += (dE_kn.at(1) + dV.at(m - k).at(1)) * exp(-beta * (save_E_kn.at(count) + V.at(m - k)));
+                sig.at(2) += (dE_kn.at(2) + dV.at(m - k).at(2)) * exp(-beta * (save_E_kn.at(count) + V.at(m - k)));
+ 
+                //if (universe->me ==0){
+                //  printf("E_kn(%d): %e, V(%d-%d): %e, V(%d): %e \n", count, save_E_kn.at(count),m,k, V.at(m - k), m, V.at(m));}
 
                 count++;
-
             }
 
-            double  sig_denom_m = (double)m*exp(-beta*(V.at(m)-Elongest));
+            //partition beta for the sake of numerical stability.
+            sig_denom_m = (double)m*exp(-beta*(V.at(m))/(double)beta_n);
+
 	    if(sig_denom_m ==0 || std::isnan(sig_denom_m) || std::isinf(sig_denom_m) || std::isnan(sig.at(0)) || std::isinf(sig.at(0))) {
 	      if (universe->iworld ==0){
 		std::cout << "m is: "<< m << " Elongest is: " << Elongest << " V.at(m-1) is " <<V.at(m-1)<< " beta is: " << beta << " sig_denom_m is: " <<sig_denom_m << std::endl;
 	      }
+	      exit(0);
 	    }
 
-            //std::cout<<m<<" "<<beta<<" "<<V.at(m)<<std::endl;
-            //std::cout<<"sig[0] is: " <<sig.at(0)<<" sig_denom_m is: "<<sig_denom_m<<std::endl;
-            dV.at(m).at(0) = sig.at(0) / sig_denom_m;
-            dV.at(m).at(1) = sig.at(1) / sig_denom_m;
-            dV.at(m).at(2) = sig.at(2) / sig_denom_m;
+            for(int ib=0; ib<beta_n; ib++){
+              if(ib==0){
+                dV.at(m).at(0) = sig.at(0) / sig_denom_m;
+                dV.at(m).at(1) = sig.at(1) / sig_denom_m;
+                dV.at(m).at(2) = sig.at(2) / sig_denom_m;}
+              else{
+                dV.at(m).at(0) /= sig_denom_m;
+                dV.at(m).at(1) /= sig_denom_m;
+                dV.at(m).at(2) /= sig_denom_m;
+              }
+            }
 
 	    if(std::isinf(dV.at(m).at(0)) || std::isnan(dV.at(m).at(0))) {
 	      if (universe->iworld ==0){
-		std::cout << "sig_denom_m is: " << sig_denom_m << " Elongest is: " << Elongest
-			  << " V.at(m) is " << V.at(m) << " beta is " << beta << std::endl;}
+                std::cout << " Elongest is: " << Elongest
+                          << " V.at(m) is " << V.at(m) << " beta is " << beta << std::endl;}
 	      exit(0);
 	    }
         }
