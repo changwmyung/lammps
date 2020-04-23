@@ -853,8 +853,10 @@ void FixPIMD::initial_integrate(int /*vflag*/)
 {
   //CM debug
   //observe_temp_scalar();
+
+  if (pstat_flag && mpchain)
 //  if(update->ntimestep%100==0){
-  monitor_observable();
+    monitor_observable();
 //  }
 
   if (pstat_flag && mpchain){
@@ -3388,14 +3390,26 @@ void FixPIMD::monitor_observable()
 //  //etot
 //  observe_etot();
   //E_consv
-  observe_E_consv();
+//  observe_E_consv();
 
-  if(universe->me==0){
-    if (pimdfile){
-      //fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f\n", update->ntimestep, t_current_avg, vol_current, pressure_current, E_consv, etot/boltz/atom->natoms, vir_current_avg/boltz/atom->natoms);
-      fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    \n", update->ntimestep, t_current_avg, vol_current, pressure_current, pe_current_avg, E_consv);
-//      fprintf(pimdfile, "%f    %f    %f \n", eta_E_sum, etap_E_sum, omega_E);
+  if (pstat_flag && mpchain){
+    if(universe->me==0){
+      if (pimdfile){
+        //fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f\n", update->ntimestep, t_current_avg, vol_current, pressure_current, E_consv, etot/boltz/atom->natoms, vir_current_avg/boltz/atom->natoms);
+        fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    \n", update->ntimestep, t_current_avg, vol_current, pressure_current, pe_current_avg, E_consv);
+//        fprintf(pimdfile, "%f    %f    %f \n", eta_E_sum, etap_E_sum, omega_E);
+      }
     }
+  }
+  else{
+    if(universe->me==0){
+      if (pimdfile){
+        //fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f\n", update->ntimestep, t_current_avg, vol_current, pressure_current, E_consv, etot/boltz/atom->natoms, vir_current_avg/boltz/atom->natoms);
+        fprintf(pimdfile, "%d    %f    %f  \n", update->ntimestep, t_current_avg, vol_current);
+//        fprintf(pimdfile, "%f    %f    %f \n", eta_E_sum, etap_E_sum, omega_E);
+      }
+    }
+
   }
 }
 
