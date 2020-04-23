@@ -102,7 +102,7 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
   method_statistics = BOLTZMANN;
   fmass      = 1.0;
   nhc_temp   = 298.15;
-  nhc_nchain = 2;
+  nhc_nchain = 4;
   sp         = 1.0;
   //CM
   boltz = force->boltz;
@@ -854,7 +854,7 @@ void FixPIMD::initial_integrate(int /*vflag*/)
   //CM debug
   //observe_temp_scalar();
 
-  if (pstat_flag && mpchain)
+//  if (pstat_flag && mpchain)
 //  if(update->ntimestep%100==0){
     monitor_observable();
 //  }
@@ -969,7 +969,9 @@ void FixPIMD::initial_integrate(int /*vflag*/)
       if (kspace_flag) force->kspace->setup();
     }
 
+  //NVT
   }else{
+  t_current = compute_temp_scalar();
   nhc_update_v();
   nhc_update_x();
   }
@@ -1082,7 +1084,9 @@ void FixPIMD::final_integrate()
     nhc_temp_integrate();
     nhc_press_integrate();
 
+  //NVT
   } else{
+  t_current = compute_temp_scalar();
   nhc_update_v();
   }
 }
