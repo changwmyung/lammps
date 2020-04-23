@@ -4133,12 +4133,6 @@ std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn(const std::vector<double>
   double **f = atom->f;
   int nlocal = atom->nlocal;
   double sig_denom_m;
-  int beta_n; //partitioning beta for the low temp. limit
-  int beta_grid=10; //beat grid
-  
-  beta_n=(int)beta/beta_grid+1;
-  if (universe->me ==0)
-    printf("beta: %d, beta_n: %d \n", (int)beta, beta_n);
 
   std::vector<std::vector<double>> dV_all(n, std::vector<double>(3,0.0));
   //std::cout<<dV_all.at(0).size()<<std::endl;
@@ -4178,6 +4172,13 @@ std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn(const std::vector<double>
 
                 count++;
             }
+
+            int beta_n; //partitioning beta for the low temp. limit
+            int beta_grid=100; //beta grid
+            
+            beta_n=(int)(beta*V.at(m))/beta_grid+1;
+            if (universe->me ==0)
+              printf("beta: %d, beta_n: %d, V(m): %f \n", (int)beta, beta_n, V.at(m));
 
             //partition beta for the sake of numerical stability.
             sig_denom_m = (double)m*exp(-beta*(V.at(m))/(double)beta_n);
