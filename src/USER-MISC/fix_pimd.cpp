@@ -4018,21 +4018,23 @@ std::vector<double> FixPIMD::Evaluate_VBn(std::vector <double>& V, const int n)
   int count = 0;
   for (int m = 1; m < n+1; ++m) {
     sig_denom = 0.0;
-    Elongest=0.0;
+    //max of -beta*E
+    Elongest = sEl*(Evaluate_Ekn(m,1)+V.at(m-1));
+    //for (int k = 1; k <m+1; ++k) {
     for (int k = m; k > 0; --k) {
       E_kn = Evaluate_Ekn(m,k);
       save_E_kn.at(count) = E_kn;
-      if(k==1){
-        //!BH! I had to add 0.5 below in order to not get sigma which is zero or inf for large systems
-        //CM we choose the maximum value (-\beta*E)
-        //Elongest = sEl*E_kn;
-        Elongest = sEl*(E_kn+V.at(m-k));
-        //Elongest = E_kn;
-        //Elongest = 0.5*E_kn;
-        //Elongest = 100.0; //sEl*(std::max(E_kn,V.at(m-1)));
-        //if (universe->me ==0)
-        //  printf("Elongest/sEl: %f, %f \n", Elongest, sEl);
-      }
+//      if(k==1){
+//        //!BH! I had to add 0.5 below in order to not get sigma which is zero or inf for large systems
+//        //CM we choose the maximum value (-\beta*E)
+//        //Elongest = sEl*E_kn;
+//        Elongest = sEl*(E_kn+V.at(m-k));
+//        //Elongest = E_kn;
+//        //Elongest = 0.5*E_kn;
+//        //Elongest = 100.0; //sEl*(std::max(E_kn,V.at(m-1)));
+//        //if (universe->me ==0)
+//        //  printf("Elongest/sEl: %f, %f \n", Elongest, sEl);
+//      }
       sig_denom += exp(-beta*(E_kn + V.at(m-k)-Elongest));
 
       if(std::isnan(sig_denom) || std::isinf(sig_denom)) {
