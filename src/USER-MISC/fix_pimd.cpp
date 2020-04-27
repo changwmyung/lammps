@@ -128,6 +128,9 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
   etap_mass_flag = 0;
   eta_mass_flag = 1;
 
+  p_current_tensor_avg=NULL;
+  xc  = NULL;
+  fpre  = NULL;
   eta = NULL;
   eta_dot = NULL;
   eta_dotdot = NULL;
@@ -294,6 +297,12 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
   for(int i = 0; i < 3; ++i)
       x_buff[i] = new double[3];
 
+  memory->grow(fpre, atom->nlocal, 3, "FixPIMD::fpre");
+  memory->grow(xc, atom->nlocal, 3, "FixPIMD::xc");
+//  xc = new double*[180];
+//  for(int i = 0; i < 3; i++)
+//      xc[i] = new double[3];
+
   //CM declare 3x3 hg unit-cell
   hg_dot = new double*[3];
   for(int i = 0; i < 3; ++i)
@@ -305,6 +314,7 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
       eigv[i] = new double[3];
 
   omega_dot_eig = new double[3];
+  p_current_tensor_avg = new double[3];
 
   // Nose/Hoover temp and pressure init                                            
   
@@ -851,13 +861,16 @@ void FixPIMD::setup(int vflag)
 
 void FixPIMD::initial_integrate(int /*vflag*/)
 {
+  //CM update the centroid xc
+  update_x_centroid();
+
   //CM debug
   //observe_temp_scalar();
 
 //  if (pstat_flag && mpchain)
-//  if(update->ntimestep%100==0){
+  if(update->ntimestep%100==0){
     monitor_observable();
-//  }
+  }
 
   if (pstat_flag && mpchain){
 
@@ -1099,7 +1112,11 @@ void FixPIMD::post_force(int /*flag*/)
   //if(universe->me==0){
   //  fprintf(pimdfile, "post_force!");} 
 
+  //CM store bare forces 
+  for(int i=0; i<atom->nlocal; i++) for(int j=0; j<3; j++) fpre[i][j]=atom->f[i][j];
+
   for(int i=0; i<atom->nlocal; i++) for(int j=0; j<3; j++) atom->f[i][j] /= np;
+
   //CM if no scaling
   //for(int i=0; i<atom->nlocal; i++) for(int j=0; j<3; j++) atom->f[i][j] /= 1.0;
 
@@ -1894,12 +1911,14 @@ void FixPIMD::couple()
 
   if (pstyle == ISO){
     //CM
-    p_current[0] = p_current[1] = p_current[2] = pressure->scalar;
+    //p_current[0] = p_current[1] = p_current[2] = pressure->scalar;
+    p_current[0] = p_current[1] = p_current[2] = p_current_avg;
 //    if(universe->me==0)
 //      printf("couple(iso) pressure: %f \n", p_current[0]);
   }
   if (pcouple == XYZ) {
-    double ave = 1.0/3.0 * (tensor[0] + tensor[1] + tensor[2]);
+    //double ave = 1.0/3.0 * (tensor[0] + tensor[1] + tensor[2]);
+    double ave = 1.0/3.0 * (p_current_tensor_avg[0] + p_current_tensor_avg[1] + p_current_tensor_avg[2]);
     p_current[0] = p_current[1] = p_current[2] = ave;
     //p_current[0] = p_current[1] = p_current[2] = pressure_scalar;
 
@@ -3129,6 +3148,66 @@ void FixPIMD::compute_temp_vector()
 //                    "(%f, %f, %f, %f, %f, %f )\n", universe->iworld, t_current_vector[0], t_current_vector[1], t_current_vector[2], t_current_vector[3], t_current_vector[4], t_current_vector[5]);}
 }
 
+//CM
+void FixPIMD::update_x_centroid()
+{
+  double xx[atom->nlocal][3];
+
+  for (int i = 0; i < atom->nlocal; i++) {
+    for(int j=0; j<3; j++){
+      xx[i][j]=atom->x[i][j];
+    }
+  }
+
+//  if(universe->me==0){
+//    printf("xx: %f %f %f \n", xx[120][0], xx[120][1], xx[120][2]);
+//  }
+
+  // method 1 
+  for(int i=0; i<atom->nlocal; i++){
+      MPI_Allreduce(xx[i],xc[i],3,MPI_DOUBLE,MPI_SUM,beads_comm); 
+//      MPI_Allreduce(xx[i],xc[i],3,MPI_DOUBLE,MPI_SUM,universe->uworld); 
+  }
+  for(int i=0; i<atom->nlocal; i++){
+    for(int j=0; j<3; j++){
+      xc[i][j]/=(double)np;
+    }
+  }
+
+//  if(universe->me==0){
+//    printf("xc: %f %f %f \n", xc[120][0], xc[120][1], xc[120][2]);
+//  }
+
+//
+//  if(universe->me==0){
+//    printf("xc1 %f %f %f \n", xc[120][0], xc[120][1], xc[120][2]);
+//  }
+
+//  //method 2 
+//  nmpimd_fill(atom->x);
+//  comm_exec(atom->x);
+//  nmpimd_transform(buf_beads, atom->x, M_x2xp[universe->iworld]);
+//
+//  if(universe->me==0){
+//    printf("xc: %f %f %f \n", atom->x[120][0], atom->x[120][1], atom->x[120][2]);
+//  }
+//
+//  for (int i = 0; i < atom->nlocal; i++) {
+//    for(int j=0; j<3; j++){
+//      xc[i][j]=atom->x[i][j];
+//    }
+//  }
+//
+//  nmpimd_fill(atom->x);
+//  comm_exec(atom->x);
+//  nmpimd_transform(buf_beads, atom->x, M_xp2x[universe->iworld]);
+//
+//  if(universe->me==0){
+//    printf("xc2: %f %f %f \n", xc[120][0], xc[120][1], xc[120][2]);
+//  }
+
+}
+
 //  dvalue = pe->scalar;
 
 // CM 
@@ -3153,12 +3232,8 @@ void FixPIMD::observe_etot()
 //better to keep centroid and others as separate array.
 void FixPIMD::observe_virial_avg() 
 {
-//  double **ff;
-
   double xx[atom->nlocal][3];
-  double x_c[atom->nlocal][3];
-  double centroid=0.0;
-//  memcpy(xx, atom->x, atom->nlocal*3*sizeof(double));
+  double vir_current_p=0.0;
 
   for (int i = 0; i < atom->nlocal; i++) {
     for(int j=0; j<3; j++){
@@ -3169,35 +3244,6 @@ void FixPIMD::observe_virial_avg()
   vir_current=0.0;
   vir_current_avg=0.0;
 
-//  //CM, using the LAMMPS routine for pressure virial.
-//  for (int i=0; i<3; i++){
-//    vir_current+=p_current[i]*vol_current/nktv2p - atom->nlocal*boltz*t_current;
-//  }
-//  vir_current*=-0.5;
-
-//CM store centroid 
-  nmpimd_fill(atom->x);
-  comm_exec(atom->x);
-  nmpimd_transform(buf_beads, atom->x, M_x2xp[universe->iworld]);
-  
-  if(universe->me==0){
-    for (int i = 0; i < atom->nlocal; i++) {
-      for(int j=0; j<3; j++){
-        x_c[i][j]=atom->x[i][j]; 
-      }
-    }
-  }
-
-  nmpimd_fill(atom->x);
-  comm_exec(atom->x);
-  nmpimd_transform(buf_beads, atom->x, M_xp2x[universe->iworld]);
-
-//CM broadcast
-  MPI_Barrier(universe->uworld);
-  for(int i=0; i<atom->nlocal; i++){
-    MPI_Bcast(x_c[i], 3, MPI_DOUBLE, 0, universe->uworld);}
-  MPI_Barrier(universe->uworld);
-
 //CM
 //direct summation of virial, but lots of fluctuations...
 //CM
@@ -3206,30 +3252,29 @@ void FixPIMD::observe_virial_avg()
 //  if(universe->me==0)
 //    printf("force0: %f %f %f \n", atom->f[150][0],atom->f[150][1],atom->f[150][2]);
 
-  nmpimd_fill(atom->f);
-  comm_exec(atom->f);
-  nmpimd_transform(buf_beads, atom->f, M_fp2f[universe->iworld]);
-
-  comm_exec(atom->x);
-  remove_spring_force();
+//  nmpimd_fill(atom->f);
+//  comm_exec(atom->f);
+//  nmpimd_transform(buf_beads, atom->f, M_fp2f[universe->iworld]);
+//
+//  comm_exec(atom->x);
+//  remove_spring_force();
 
 //  if(universe->me==0)
 //    printf("force1: %f %f %f \n", atom->f[150][0],atom->f[150][1],atom->f[150][2]);
 
   for (int i = 0; i < atom->nlocal; i++) {
     for(int j=0; j<3; j++){
-      double ff=atom->f[i][j];
-      vir_current -= ff * (xx[i][j] - x_c[i][j]);
+      vir_current_p -= fpre[i][j]/(double)np*(xx[i][j] - xc[i][j]);
     }
   }
-  vir_current*=0.5;
+  vir_current_p*=0.5;
 
-  comm_exec(atom->x);
-  spring_force();
-
-  nmpimd_fill(atom->f);
-  comm_exec(atom->f);
-  nmpimd_transform(buf_beads, atom->f, M_f2fp[universe->iworld]);
+//  comm_exec(atom->x);
+//  spring_force();
+//
+//  nmpimd_fill(atom->f);
+//  comm_exec(atom->f);
+//  nmpimd_transform(buf_beads, atom->f, M_f2fp[universe->iworld]);
 
 //  if(universe->me==0)
 //    printf("force0: %f %f %f \n", atom->f[150][0],atom->f[150][1],atom->f[150][2]);
@@ -3241,12 +3286,17 @@ void FixPIMD::observe_virial_avg()
 ////  }
 //
 
-  //gather and sum vir.
-  MPI_Gather(&vir_current, 1, MPI_DOUBLE, vir_current_beads, 1, MPI_DOUBLE, 0, universe->uworld);
-  if(universe->me==0){
-    vir_current_avg=compute_sum(vir_current_beads, np);
-  }
-  MPI_Barrier(universe->uworld);
+  //sum nlocal 
+  MPI_Allreduce(&vir_current_p,&vir_current,1,MPI_DOUBLE,MPI_SUM,world);
+  //sum over beads
+  MPI_Allreduce(&vir_current,&vir_current_avg,1,MPI_DOUBLE,MPI_SUM,beads_comm);
+
+//  //gather and sum vir.
+//  MPI_Gather(&vir_current, 1, MPI_DOUBLE, vir_current_beads, 1, MPI_DOUBLE, 0, universe->uworld);
+//  if(universe->me==0){
+//    vir_current_avg=compute_sum(vir_current_beads, np);
+//  }
+//  MPI_Barrier(universe->uworld);
 }
 
 //pimd consv. energy
@@ -3391,16 +3441,17 @@ void FixPIMD::monitor_observable()
   observe_temp_scalar();
   //pressure
   double pressure_current = 1.0/3.0 * (p_current[0] + p_current[1] + p_current[2]);
-//  //etot
-//  observe_etot();
+
+  //etot
+  observe_etot();
   //E_consv
-//  observe_E_consv();
+  observe_E_consv();
 
   if (pstat_flag && mpchain){
     if(universe->me==0){
       if (pimdfile){
-        //fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f\n", update->ntimestep, t_current_avg, vol_current, pressure_current, E_consv, etot/boltz/atom->natoms, vir_current_avg/boltz/atom->natoms);
-        fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    \n", update->ntimestep, t_current_avg, vol_current, pressure_current, pe_current_avg, E_consv);
+        fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f\n", update->ntimestep, t_current_avg, vol_current, pressure_current, E_consv, etot/boltz/atom->natoms, vir_current_avg/boltz/atom->natoms);
+        //fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    \n", update->ntimestep, t_current_avg, vol_current, pressure_current, pe_current_avg, E_consv);
 //        fprintf(pimdfile, "%f    %f    %f \n", eta_E_sum, etap_E_sum, omega_E);
       }
     }
@@ -3461,6 +3512,8 @@ double FixPIMD::compute_avg(double *array, int n)
 //wrapper function for pimd pressure virial calculation
 void FixPIMD::compute_pressure_scalar()
 {
+  //ISO case
+  double p_current_p;
   //CM compute the pressure in NM coordinates
   if(method==CMD || method==NMPIMD)
   {
@@ -3474,8 +3527,10 @@ void FixPIMD::compute_pressure_scalar()
   
 //      if(universe->me==7)
 //        printf("position1: %f %f %f \n", atom->x[150][0],atom->x[150][1],atom->x[150][2]);
-  
-      pressure->compute_scalar();
+    p_current_avg=0.0;  
+    p_current_p=pressure->compute_scalar();
+    MPI_Allreduce(&p_current_p,&p_current_avg,1,MPI_DOUBLE,MPI_SUM,beads_comm);
+    p_current_avg/=(double)np;
 
 //      nmpimd_fill(atom->x);
 //      comm_exec(atom->x);
@@ -3489,21 +3544,34 @@ void FixPIMD::compute_pressure_scalar()
 }
 
 //wrapper function for pimd pressure virial calculation
+//CM
+//Pressure primitive estimator
 void FixPIMD::compute_pressure_vector()
 {
+  temperature->compute_vector();
+  pressure->compute_vector();
+  compute_temp_vector();
+
+  double *p_current_tensor_p=pressure->vector;
+  double *t_tensor=temperature->vector;
+  double *t_tensor_nm=t_current_vector;
+  double volume=domain->xprd*domain->yprd*domain->zprd;
+
+//  if(universe->me==0)
+//    printf("p_current: %f %f %f \n", p_current_tensor_p[0],p_current_tensor_p[1],p_current_tensor_p[2]);
+
   //CM compute the pressure in NM coordinates
   if(method==CMD || method==NMPIMD)
   {
-//      nmpimd_fill(atom->x);
-//      comm_exec(atom->x);
-
-//      nmpimd_transform(buf_beads, atom->x, M_x2xp[universe->iworld]);
-      pressure->compute_vector();
-  
-//      nmpimd_fill(atom->x);
-///      comm_exec(atom->x);
-
-//      nmpimd_transform(buf_beads, atom->x, M_xp2x[universe->iworld]);
+    //correct temp term.
+    for(int i=0; i<3; ++i){
+      p_current_tensor_p[i]-=atom->natoms*boltz*t_tensor[i]/volume;
+      p_current_tensor_p[i]+=atom->natoms*boltz*t_tensor_nm[i]/volume;
+    }
+    MPI_Allreduce(p_current_tensor_p,p_current_tensor_avg,3,MPI_DOUBLE,MPI_SUM,beads_comm);
+//    for(int i=0; i<3; ++i){
+//      p_current_tensor_avg[i]/=(double)np;
+//    }
   }
   else{
     pressure->compute_vector();}

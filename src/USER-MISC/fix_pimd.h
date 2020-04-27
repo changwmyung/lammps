@@ -213,7 +213,11 @@ class FixPIMD : public Fix {
   //pressure virial
   void compute_pressure_scalar();
   double pressure_scalar;
+  double p_current_avg;
   void compute_pressure_vector();
+//  double *p_current_tensor_p;
+  double *p_current_tensor_avg;
+
   //temp measure
   //scalar
   double compute_temp_scalar();
@@ -249,6 +253,9 @@ class FixPIMD : public Fix {
   double vir_current_avg;
   void observe_virial_avg();
   double **x_buff;
+  double **xc; //centroid
+  void update_x_centroid();
+  double **fpre; //bare force
 
   //consv energy 
   double E_consv;
