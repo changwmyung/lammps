@@ -130,6 +130,7 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
 
   p_current_tensor_avg=NULL;
   xc  = NULL;
+  fc  = NULL;
   fpre  = NULL;
   eta = NULL;
   eta_dot = NULL;
@@ -299,6 +300,8 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
 
   memory->grow(fpre, atom->nlocal, 3, "FixPIMD::fpre");
   memory->grow(xc, atom->nlocal, 3, "FixPIMD::xc");
+  memory->grow(fc, atom->nlocal, 3, "FixPIMD::fc");
+
 //  xc = new double*[180];
 //  for(int i = 0; i < 3; i++)
 //      xc[i] = new double[3];
@@ -861,8 +864,9 @@ void FixPIMD::setup(int vflag)
 
 void FixPIMD::initial_integrate(int /*vflag*/)
 {
-  //CM update the centroid xc
+  //CM update the centroid xc & fc
   update_x_centroid();
+  update_f_centroid();
 
   //CM debug
   //observe_temp_scalar();
@@ -3148,7 +3152,29 @@ void FixPIMD::compute_temp_vector()
 //                    "(%f, %f, %f, %f, %f, %f )\n", universe->iworld, t_current_vector[0], t_current_vector[1], t_current_vector[2], t_current_vector[3], t_current_vector[4], t_current_vector[5]);}
 }
 
+//update the centroid forces
+void FixPIMD::update_f_centroid()
+{
+  double ff[atom->nlocal][3];
+
+  for (int i = 0; i < atom->nlocal; i++) {
+    for(int j=0; j<3; j++){
+      ff[i][j]=fpre[i][j]/np;
+    }
+  }
+
+  for(int i=0; i<atom->nlocal; i++){
+      MPI_Allreduce(ff[i],fc[i],3,MPI_DOUBLE,MPI_SUM,beads_comm); 
+  }
+  for(int i=0; i<atom->nlocal; i++){
+    for(int j=0; j<3; j++){
+      fc[i][j]/=(double)np;
+    }
+  }
+}
+
 //CM
+//update the centroid position
 void FixPIMD::update_x_centroid()
 {
   double xx[atom->nlocal][3];
@@ -3545,7 +3571,7 @@ void FixPIMD::compute_pressure_scalar()
 
 //wrapper function for pimd pressure virial calculation
 //CM
-//Pressure primitive estimator
+//Pressure centroid estimator
 void FixPIMD::compute_pressure_vector()
 {
   temperature->compute_vector();
@@ -3557,6 +3583,40 @@ void FixPIMD::compute_pressure_vector()
   double *t_tensor_nm=t_current_vector;
   double volume=domain->xprd*domain->yprd*domain->zprd;
 
+  double virial[3];
+
+  virial[0]=virial[1]=virial[2]=0.0;
+  for(int i=0; i<atom->nlocal; i++){
+    for(int j=0; j<3; j++){
+      virial[j]+=fpre[i][j]*atom->x[i][j];
+    }
+  }
+
+  for(int i=0; i<3; ++i){
+    p_current_tensor_p[i]-=virial[i]/volume;
+    p_current_tensor_p[i]-=atom->natoms*boltz*t_tensor[i]/volume;
+  }
+
+  //dU/dV
+  MPI_Allreduce(MPI_IN_PLACE,p_current_tensor_p,3,MPI_DOUBLE,MPI_SUM,beads_comm);
+  for(int i=0; i<3; ++i){
+    p_current_tensor_p[i]/=(double)np;
+  }
+
+  virial[0]=virial[1]=virial[2]=0.0;
+  for(int i=0; i<atom->nlocal; i++){
+    for(int j=0; j<3; j++){
+      virial[j]+=fc[i][j]*xc[i][j];
+    }
+  }
+
+  for(int i=0; i<3; ++i){
+    p_current_tensor_p[i]+=virial[i]/volume;
+    p_current_tensor_p[i]+=atom->natoms*boltz*t_tensor_nm[i]/volume;
+  }
+  MPI_Allreduce(p_current_tensor_p,p_current_tensor_avg,3,MPI_DOUBLE,MPI_SUM,world);
+
+/*
 //  if(universe->me==0)
 //    printf("p_current: %f %f %f \n", p_current_tensor_p[0],p_current_tensor_p[1],p_current_tensor_p[2]);
 
@@ -3575,6 +3635,7 @@ void FixPIMD::compute_pressure_vector()
   }
   else{
     pressure->compute_vector();}
+*/
 }
 
 /*

@@ -254,7 +254,9 @@ class FixPIMD : public Fix {
   void observe_virial_avg();
   double **x_buff;
   double **xc; //centroid
+  double **fc; //centroid
   void update_x_centroid();
+  void update_f_centroid();
   double **fpre; //bare force
 
   //consv energy 
