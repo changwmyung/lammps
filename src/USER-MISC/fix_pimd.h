@@ -239,6 +239,8 @@ class FixPIMD : public Fix {
   void monitor_observable();
   void initialize_logfile();
   double etot; 
+  double ketot; 
+  double petot; 
   void observe_etot();
 
   //pe

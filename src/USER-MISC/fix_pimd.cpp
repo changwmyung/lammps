@@ -329,7 +329,7 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
   int max = 3 * atom->natoms;
   int ich;
   
-  if(universe->me==0) printf("memory start\n");
+  //if(universe->me==0) printf("memory start\n");
 
   //allocating memory for array
   //eta = new double[max][mtchain];
@@ -342,7 +342,7 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
   //eta_mass = new double[max][mtchain];
   memory->grow(eta_mass,   max, mtchain,   "FixPIMD::eta_mass");
 
-  if(universe->me==0) printf("memory complete\n");
+  //if(universe->me==0) printf("memory complete\n");
 
   for(int ip=0;ip<max;ip++){
     eta_dot[ip][mtchain] = 0.0;
@@ -499,9 +499,6 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
 
   nhc_ready = false;
 
-  pimdfile = fopen("pimd.log","w");
-  initialize_logfile();
-
 
 }
 
@@ -521,10 +518,13 @@ int FixPIMD::setmask()
 
 void FixPIMD::init()
 {
+  pimdfile = fopen("pimd.log","w");
+  initialize_logfile();
+
   if (atom->map_style == 0)
     error->all(FLERR,"Fix pimd requires an atom map, see atom_modify");
 
-  if(universe->me==0 && screen) fprintf(screen,"Fix pimd initializing Path-Integral ...\n");
+  //if(universe->me==0 && screen) fprintf(screen,"Fix pimd initializing Path-Integral ...\n");
 
   // prepare the constants
   np = universe->nworlds;
@@ -560,8 +560,10 @@ void FixPIMD::init()
   omega_np = sqrt(np) / (hbar * beta) * sqrt(force->mvv2e);
   fbond = - _fbond * force->mvv2e;
 
+  if(universe->me==0) fprintf(pimdfile, "\n********************************************** UNITS **********************************************\n");
   if(universe->me==0)
-    printf("Fix pimd -P/(beta^2 * hbar^2) = %20.7lE (kcal/mol/A^2)\n\n", fbond);
+    fprintf(pimdfile, " -P/(beta^2 * hbar^2) = %20.7lE (kcal/mol/A^2)\n", fbond);
+  if(universe->me==0) fprintf(pimdfile, "*****************************************************************************************************\n");
 
 //  // CM 
 //  // setting the time-step for npt as well
@@ -611,8 +613,8 @@ void FixPIMD::init()
   vol_current=domain->xprd*domain->yprd*domain->zprd;
 
   int icompute = modify->find_compute(id_temp);
-  if(universe->me==0)
-    printf("icompute temp is: %d \n", icompute);
+//  if(universe->me==0)
+//    printf("icompute temp is: %d \n", icompute);
 
   if (icompute < 0)
     error->all(FLERR,"Temperature ID for fix nvt/npt does not exist");
@@ -620,8 +622,8 @@ void FixPIMD::init()
 
   if (pstat_flag) {
     icompute = modify->find_compute(id_press);
-    if(universe->me==0)
-      printf("icompute press is: %d \n", icompute);
+//    if(universe->me==0)
+//      printf("icompute press is: %d \n", icompute);
     if (icompute < 0)
       error->all(FLERR,"Pressure ID for fix npt/nph does not exist");
     pressure = modify->compute[icompute];
@@ -631,15 +633,14 @@ void FixPIMD::init()
   icompute = modify->find_compute(id_pe);
   pe = modify->compute[icompute];
 
-  //CM test for NPT
-  if(universe->me==0)
-    printf("p_start/p_stop/pstyle = %f / %f / %d \n", p_start[0], p_stop[0], pstyle);
-    printf("p_flag = %d / %d / %d / %d / %d / %d / %d / %d \n", p_flag[0], p_flag[1], p_flag[2], p_flag[3], p_flag[4], p_flag[5], pdim, pstat_flag);
+//  //CM test for NPT
+//  if(universe->me==0)
+//    printf("p_start/p_stop/pstyle = %f / %f / %d \n", p_start[0], p_stop[0], pstyle);
+//    printf("p_flag = %d / %d / %d / %d / %d / %d / %d / %d \n", p_flag[0], p_flag[1], p_flag[2], p_flag[3], p_flag[4], p_flag[5], pdim, pstat_flag);
 
   kspace_flag = 0;
   //if (force->kspace) kspace_flag = 1;
   //else kspace_flag = 0;
-
 
   // MPI initialization between beads
   comm_init();
@@ -665,14 +666,24 @@ void FixPIMD::init()
 //  printf("COMM RANK/SIZE: %d/%d \n",
 //    comm->me, comm->nprocs);
 
+  /*
+  MPI COMMUNICATORS for fix pimd
+
+  universe: the toal cores 
+  universe->uwolrd: MPI communicator for all cores.
+
+  world: MPI communicator between cores within the partition. It reduces nlocals to natoms.
+
+  beads_comm: MPI communicator between beads.
+  */
+
   //CM beads-to-beads MPI Comm
   int color=universe->me%comm->nprocs; 
-
   MPI_Comm_split(universe->uworld,color,universe->me,&beads_comm);
   MPI_Comm_rank(beads_comm, &beads_rank);
   MPI_Comm_size(beads_comm, &beads_size);
 
-  printf("UNIVERSE RANK/SIZE: %d/%d --- WORLD i/n: %d/%d --- BEADS RANK/SIZE: %d/%d\n",
+  printf("UNIVERSE RANK/SIZE (total): %d/%d --- WORLD i/n (partitions): %d/%d --- BEADS RANK/SIZE (beads): %d/%d\n",
     universe->me, universe->nprocs, universe->iworld, universe->nworlds, beads_rank, beads_size);
 
   int world_rank, world_size;
@@ -706,10 +717,25 @@ void FixPIMD::init()
 //      universe->me, universe->nprocs, beads_rank, beads_size);
 //  }
 
-  //BOSON
+  //CM
+  //It is important to sure that the particle sorting is disabled. Unless, the simulation is unreliable. 
+  if(atom->sortfreq>0&&(method==CMD||method==NMPIMD)){
+    if(universe->me==0) fprintf(pimdfile, "\n********************************************* WARNINGS **********************************************\n");
+    if(universe->me==0) fprintf(pimdfile, "Particle sort should be disabled. Unless the normal mode transformation becomes non-sense!\n");
+    if(universe->me==0) fprintf(pimdfile, "Please insert this line in the LAMMPS input file: atom_modify sort 0 0.0 \n");
+    if(universe->me==0) fprintf(pimdfile, "Hope know what you are doing...");
+    //error->all(FLERR,"Local particle sort enabled - normal mode transformation becomes nonsense.");
+    if(universe->me==0) fprintf(pimdfile, "\n*****************************************************************************************************\n");
+  }
+
+  if(universe->me==0) fprintf(pimdfile, "\n***************************************** Nuclei STATISTICS *****************************************\n");
+  if(method_statistics==BOLTZMANN)
+    if(universe->me==0) fprintf(pimdfile, " - Please note that nuclei follow distinguishable BOLTZMANN statistics (default).\n");
   if(method_statistics==BOSON)
-    if(universe->me==0)
-      printf("Particles are bosonic!\n");
+    if(universe->me==0) fprintf(pimdfile, " - Please note that nuclei obey indistinguishable BOSON statistics rather than BOLTZMANN.\n");
+  if(universe->me==0) fprintf(pimdfile, "*****************************************************************************************************\n");
+
+  if(universe->me==0) fprintf(pimdfile, "\nStep       Temp (K)       Volume       Pressure       E_consv. (K)      E_tot (K/ptcl)    PE (K/ptcl)   KE(K/ptcl)\n");
 
   E_kn=std::vector<double>((atom->natoms * (atom->natoms + 1) / 2),0.0);
   V=std::vector<double>((atom->natoms + 1),0.0);
@@ -722,7 +748,7 @@ void FixPIMD::init()
 void FixPIMD::setup(int vflag)
 {
 
-  if(universe->me==0 && screen) fprintf(screen,"Setting up Path-Integral ...\n");
+  //if(universe->me==0 && screen) fprintf(screen,"Setting up Path-Integral ...\n");
 
   //CM
   //force is updated first 
@@ -731,7 +757,7 @@ void FixPIMD::setup(int vflag)
   //post_force(vflag);  //previous post_force function
   //remove_spring_force();
 
-  if(universe->me==0 && screen) fprintf(screen,"1. Setting up Path-Integral ...\n");
+  //if(universe->me==0 && screen) fprintf(screen,"1. Setting up Path-Integral ...\n");
 
 /* CM ----------------------------------------------------------------------
   Compute T,P before integrator starts
@@ -866,13 +892,12 @@ void FixPIMD::initial_integrate(int /*vflag*/)
 {
   //CM update the centroid xc & fc
   update_x_centroid();
-  update_f_centroid();
 
   //CM debug
   //observe_temp_scalar();
 
 //  if (pstat_flag && mpchain)
-  if(update->ntimestep%100==0){
+  if(update->ntimestep%10==0){
     monitor_observable();
   }
 
@@ -1116,13 +1141,13 @@ void FixPIMD::post_force(int /*flag*/)
   //if(universe->me==0){
   //  fprintf(pimdfile, "post_force!");} 
 
-  //CM store bare forces 
+  //CM store bare forces before transformations
   for(int i=0; i<atom->nlocal; i++) for(int j=0; j<3; j++) fpre[i][j]=atom->f[i][j];
 
   for(int i=0; i<atom->nlocal; i++) for(int j=0; j<3; j++) atom->f[i][j] /= np;
 
-  //CM if no scaling
-  //for(int i=0; i<atom->nlocal; i++) for(int j=0; j<3; j++) atom->f[i][j] /= 1.0;
+  //CM store the centroid force
+  update_f_centroid();
 
   comm_exec(atom->x);
   spring_force();
@@ -1140,6 +1165,7 @@ void FixPIMD::post_force(int /*flag*/)
     /* normal-mode transform */
 
     nmpimd_transform(buf_beads, atom->f, M_f2fp[universe->iworld]);
+    
   }
 }
 
@@ -1362,11 +1388,11 @@ void FixPIMD::nmpimd_init()
   for(int i=0; i<np; i++)
     for(int j=0; j<np; j++)
     {
-      M_xp2x[i][j] = M_x2xp[j][i] * np;
-      M_f2fp[i][j] = M_x2xp[i][j] * np;
+      M_xp2x[i][j] = M_x2xp[j][i]*np;
+      M_f2fp[i][j] = M_x2xp[i][j]*np;
       // CM found a bug
       //M_fp2f[i][j] = M_xp2x[i][j];
-      M_fp2f[i][j] = M_xp2x[i][j] / np;
+      M_fp2f[i][j] = M_xp2x[i][j]/np;
     }
 
   // Set up masses
@@ -1923,6 +1949,7 @@ void FixPIMD::couple()
   if (pcouple == XYZ) {
     //double ave = 1.0/3.0 * (tensor[0] + tensor[1] + tensor[2]);
     double ave = 1.0/3.0 * (p_current_tensor_avg[0] + p_current_tensor_avg[1] + p_current_tensor_avg[2]);
+    //double ave = (p_current_tensor_avg[0] + p_current_tensor_avg[1] + p_current_tensor_avg[2]);
     p_current[0] = p_current[1] = p_current[2] = ave;
     //p_current[0] = p_current[1] = p_current[2] = pressure_scalar;
 
@@ -3144,7 +3171,8 @@ void FixPIMD::compute_temp_vector()
   MPI_Allreduce(t,t_current_vector,6,MPI_DOUBLE,MPI_SUM,world);
 
   for (int idim=0; idim<6; idim++){
-    t_current_vector[idim]*=force->mvv2e/boltz/atom->natoms/dimension;
+    //t_current_vector[idim]*=force->mvv2e/boltz/atom->natoms/dimension;
+    t_current_vector[idim]*=force->mvv2e/boltz/atom->natoms;
   }
 
 //  if (logfile){
@@ -3155,22 +3183,49 @@ void FixPIMD::compute_temp_vector()
 //update the centroid forces
 void FixPIMD::update_f_centroid()
 {
+
+  //method 1
   double ff[atom->nlocal][3];
 
   for (int i = 0; i < atom->nlocal; i++) {
     for(int j=0; j<3; j++){
-      ff[i][j]=fpre[i][j]/np;
+      ff[i][j]=fpre[i][j]/(double)np;
     }
   }
 
   for(int i=0; i<atom->nlocal; i++){
       MPI_Allreduce(ff[i],fc[i],3,MPI_DOUBLE,MPI_SUM,beads_comm); 
   }
-  for(int i=0; i<atom->nlocal; i++){
-    for(int j=0; j<3; j++){
-      fc[i][j]/=(double)np;
-    }
-  }
+
+//  if(universe->me==23){
+//    printf("fc1:%d %f %f %f \n", atom->tag[120], fc[120][0], fc[120][1], fc[120][2]);
+//  }
+
+//  //method 2
+//  nmpimd_fill(atom->f);
+//  comm_exec(atom->f);
+//  nmpimd_transform(buf_beads, atom->f, M_f2fp[universe->iworld]);
+//
+//  for (int i = 0; i < atom->nlocal; i++) {
+//    for(int j=0; j<3; j++){
+//      fc[i][j]=atom->f[i][j];
+//    }
+//  }
+//
+//  //broadcast the centroid force
+//  MPI_Barrier(universe->uworld);
+//  for(int i=0; i<atom->nlocal; i++){
+//    MPI_Bcast(fc[i], 3, MPI_DOUBLE, 0, universe->uworld);}
+//  MPI_Barrier(universe->uworld);
+//
+//  nmpimd_fill(atom->f);
+//  comm_exec(atom->f);
+//  nmpimd_transform(buf_beads, atom->f, M_fp2f[universe->iworld]);
+//
+//  if(universe->me==23){
+//    printf("fc2:%d %f %f %f \n", atom->tag[120], fc[120][0], fc[120][1], fc[120][2]);
+//  }
+
 }
 
 //CM
@@ -3184,6 +3239,18 @@ void FixPIMD::update_x_centroid()
       xx[i][j]=atom->x[i][j];
     }
   }
+
+//  if(universe->me==0){
+//    printf("xx0: %d %f %f %f \n", atom->tag[120],  xx[120][0], xx[120][1], xx[120][2]);
+//  }
+//
+//  if(universe->me==15){
+//    printf("xx15: %d %f %f %f \n", atom->tag[120], xx[120][0], xx[120][1], xx[120][2]);
+//  }
+//
+//  if(universe->me==31){
+//    printf("xx31: %d %f %f %f \n", atom->tag[120], xx[120][0], xx[120][1], xx[120][2]);
+//  }
 
 //  if(universe->me==0){
 //    printf("xx: %f %f %f \n", xx[120][0], xx[120][1], xx[120][2]);
@@ -3200,23 +3267,14 @@ void FixPIMD::update_x_centroid()
     }
   }
 
-//  if(universe->me==0){
-//    printf("xc: %f %f %f \n", xc[120][0], xc[120][1], xc[120][2]);
-//  }
-
-//
-//  if(universe->me==0){
-//    printf("xc1 %f %f %f \n", xc[120][0], xc[120][1], xc[120][2]);
+//  if(universe->me==23){
+//    printf("xc1:%d %f %f %f \n", atom->tag[120], xc[120][0], xc[120][1], xc[120][2]);
 //  }
 
 //  //method 2 
 //  nmpimd_fill(atom->x);
 //  comm_exec(atom->x);
 //  nmpimd_transform(buf_beads, atom->x, M_x2xp[universe->iworld]);
-//
-//  if(universe->me==0){
-//    printf("xc: %f %f %f \n", atom->x[120][0], atom->x[120][1], atom->x[120][2]);
-//  }
 //
 //  for (int i = 0; i < atom->nlocal; i++) {
 //    for(int j=0; j<3; j++){
@@ -3228,13 +3286,24 @@ void FixPIMD::update_x_centroid()
 //  comm_exec(atom->x);
 //  nmpimd_transform(buf_beads, atom->x, M_xp2x[universe->iworld]);
 //
-//  if(universe->me==0){
-//    printf("xc2: %f %f %f \n", xc[120][0], xc[120][1], xc[120][2]);
+//  //broadcast the centroid 
+//  MPI_Barrier(universe->uworld);
+//  for(int i=0; i<atom->nlocal; i++){
+//    MPI_Bcast(xc[i], 3, MPI_DOUBLE, 0, universe->uworld);}
+//  MPI_Barrier(universe->uworld);
+//
+////  if(universe->me==0){
+////    printf("xc2: %f %f %f \n", xc[120][0], xc[120][1], xc[120][2]);
+////  }
+//
+//  if(universe->me==23){
+//    printf("xc2:%d %f %f %f \n",atom->tag[120], xc[120][0], xc[120][1], xc[120][2]);
 //  }
 
 }
 
 //  dvalue = pe->scalar;
+
 
 // CM 
 // is unit ok?
@@ -3242,14 +3311,21 @@ void FixPIMD::observe_etot()
 {
   int nlocal = atom->nlocal;
   etot=0.0;
+  ketot=0.0;
+  petot=0.0;
   //temp contribution
-  etot+=dimension*nlocal*boltz*t_current_avg/2.;
+  //etot+=dimension*atom->natoms*boltz*t_current_avg/2.;
+  //etot+=3.0*atom->natoms*boltz*t_current_avg/2.;
+
   //pe
   observe_pe_avg();
-  etot+=pe_current_avg;
-  //vir
+  petot+=pe_current_avg;
+  //ke
+  ketot+=3.0*atom->natoms*boltz*nhc_temp/2.;
   observe_virial_avg();
-  etot+=vir_current_avg;
+  ketot+=vir_current_avg;
+  //etot
+  etot=petot+ketot;
 }
 
 //CM
@@ -3259,7 +3335,6 @@ void FixPIMD::observe_etot()
 void FixPIMD::observe_virial_avg() 
 {
   double xx[atom->nlocal][3];
-  double vir_current_p=0.0;
 
   for (int i = 0; i < atom->nlocal; i++) {
     for(int j=0; j<3; j++){
@@ -3285,15 +3360,29 @@ void FixPIMD::observe_virial_avg()
 //  comm_exec(atom->x);
 //  remove_spring_force();
 
-//  if(universe->me==0)
-//    printf("force1: %f %f %f \n", atom->f[150][0],atom->f[150][1],atom->f[150][2]);
+//  if(universe->me==23)
+//    printf("xx: %f %f %f \n", xx[150][0],xx[150][1],xx[150][2]);
+//  if(universe->me==23)
+//    printf("xc: %f %f %f \n", xc[150][0],xc[150][1],xc[150][2]);
 
+  //centroid virial
+  double vir_current_p=0.0;
   for (int i = 0; i < atom->nlocal; i++) {
     for(int j=0; j<3; j++){
-      vir_current_p -= fpre[i][j]/(double)np*(xx[i][j] - xc[i][j]);
+      vir_current_p -= fpre[i][j]*(xx[i][j] - xc[i][j]);
+      //vir_current_p -= fpre[i][j]*(xx[i][j] - xc[i][j]);
+      //vir_current_p += abs(fpre[i][j]/(double)np*(xx[i][j] - xc[i][j]));
     }
   }
-  vir_current_p*=0.5;
+  vir_current_p*=0.5/(double)np;
+
+//  //primitive virial 
+//  for (int i = 0; i < atom->nlocal; i++) {
+//    for(int j=0; j<3; j++){
+//      vir_current_p -= fpre[i][j]/(double)np*xx[i][j];
+//    }
+//  }
+//  vir_current_p*=0.5;
 
 //  comm_exec(atom->x);
 //  spring_force();
@@ -3313,9 +3402,10 @@ void FixPIMD::observe_virial_avg()
 //
 
   //sum nlocal 
-  MPI_Allreduce(&vir_current_p,&vir_current,1,MPI_DOUBLE,MPI_SUM,world);
+  //MPI_Allreduce(&vir_current_p,&vir_current,1,MPI_DOUBLE,MPI_SUM,world);
   //sum over beads
-  MPI_Allreduce(&vir_current,&vir_current_avg,1,MPI_DOUBLE,MPI_SUM,beads_comm);
+  //MPI_Allreduce(&vir_current,&vir_current_avg,1,MPI_DOUBLE,MPI_SUM,beads_comm);
+  MPI_Allreduce(&vir_current_p,&vir_current_avg,1,MPI_DOUBLE,MPI_SUM,universe->uworld);
 
 //  //gather and sum vir.
 //  MPI_Gather(&vir_current, 1, MPI_DOUBLE, vir_current_beads, 1, MPI_DOUBLE, 0, universe->uworld);
@@ -3467,6 +3557,7 @@ void FixPIMD::monitor_observable()
   observe_temp_scalar();
   //pressure
   double pressure_current = 1.0/3.0 * (p_current[0] + p_current[1] + p_current[2]);
+  //double pressure_current =  (p_current[0] + p_current[1] + p_current[2]);
 
   //etot
   observe_etot();
@@ -3476,7 +3567,11 @@ void FixPIMD::monitor_observable()
   if (pstat_flag && mpchain){
     if(universe->me==0){
       if (pimdfile){
-        fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f\n", update->ntimestep, t_current_avg, vol_current, pressure_current, E_consv, etot/boltz/atom->natoms, vir_current_avg/boltz/atom->natoms);
+        fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f    %f\n", 
+                          update->ntimestep, t_current_avg, vol_current, pressure_current, 
+                          E_consv, etot/boltz/atom->natoms, petot/boltz/atom->natoms, ketot/boltz/atom->natoms);
+
+        //fprintf(pimdfile, "%d    %f    %f\n", update->ntimestep,  ketot/boltz,  boltz);
         //fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    \n", update->ntimestep, t_current_avg, vol_current, pressure_current, pe_current_avg, E_consv);
 //        fprintf(pimdfile, "%f    %f    %f \n", eta_E_sum, etap_E_sum, omega_E);
       }
@@ -3486,7 +3581,10 @@ void FixPIMD::monitor_observable()
     if(universe->me==0){
       if (pimdfile){
         //fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f\n", update->ntimestep, t_current_avg, vol_current, pressure_current, E_consv, etot/boltz/atom->natoms, vir_current_avg/boltz/atom->natoms);
-        fprintf(pimdfile, "%d    %f    %f  \n", update->ntimestep, t_current_avg, vol_current);
+        //fprintf(pimdfile, "%d    %f    %f  \n", update->ntimestep, t_current_avg, vol_current);
+        fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f\n", 
+                          update->ntimestep, t_current_avg, vol_current, pressure_current, 
+                          etot/boltz/atom->natoms, petot/boltz/atom->natoms, ketot/boltz/atom->natoms);
 //        fprintf(pimdfile, "%f    %f    %f \n", eta_E_sum, etap_E_sum, omega_E);
       }
     }
@@ -3511,8 +3609,8 @@ void FixPIMD::initialize_logfile()
         " |  __/ (_| | |_| | | |  | || | | | ||  __/ (_| | | | (_| | | | |  | | |_| |        \n"  
         " |_|   \\__,_|\\__|_| |_| |___|_| |_|\\__\\___|\\__, |_|  \\__,_|_| |_|  |_|____/   \n" 
         "                                           |___/                                    \n"  
+        "                                                                                    \n"
         "                                                                   ver.2.0          \n"); 
-      fprintf(pimdfile, "Step    Temp (K)    Volume    Pressure    E_consv. (K)   E_tot (K/particle) \n");
     }
   }
 }
@@ -3574,13 +3672,67 @@ void FixPIMD::compute_pressure_scalar()
 //Pressure centroid estimator
 void FixPIMD::compute_pressure_vector()
 {
+//  pressure->compute_vector();
+
+  compute_temp_vector();
+  double *t_tensor_nm=t_current_vector;
+  double *t_tensor_md=temperature->vector;
+  double p_current_tensor_p[3];
+  double virial[3];
+  double volume=domain->xprd*domain->yprd*domain->zprd;
+
+  virial[0]=virial[1]=virial[2]=0.0;
+  for(int i=0; i<atom->nlocal; i++){
+    for(int j=0; j<3; j++){
+      virial[j]+=fc[i][j]*xc[i][j];
+    }
+  }
+
+  p_current_tensor_p[0]=p_current_tensor_p[1]=p_current_tensor_p[2]=0.0;
+  for(int i=0; i<3; ++i){
+    p_current_tensor_p[i]+=virial[i]/volume*force->nktv2p;
+  }
+  MPI_Allreduce(p_current_tensor_p,p_current_tensor_avg,3,MPI_DOUBLE,MPI_SUM,world);
+
+  for(int i=0; i<3; ++i){
+    //p_current_tensor_avg[i]+=atom->natoms*boltz*t_tensor_nm[i]/volume*force->nktv2p;
+    //p_current_tensor_avg[i]+=atom->natoms*boltz*t_current/3.0/volume*force->nktv2p;
+    p_current_tensor_avg[i]+=atom->natoms*boltz*nhc_temp/volume*force->nktv2p;
+  }
+
+// de/dv
+  pressure->compute_vector();
+  temperature->compute_scalar();
+  double *p_current_tensor_ev=pressure->vector;
+
+  virial[0]=virial[1]=virial[2]=0.0;
+  for(int i=0; i<atom->nlocal; i++){
+    for(int j=0; j<3; j++){
+      virial[j]+=fpre[i][j]*atom->x[i][j];
+    }
+  }
+
+  for(int i=0; i<3; ++i){
+    p_current_tensor_ev[i]-=virial[i]/volume*force->nktv2p;
+    p_current_tensor_ev[i]-=atom->natoms*boltz*t_tensor_md[i]/volume*force->nktv2p;
+    //p_current_tensor_ev[i]-=atom->natoms*boltz*nhc_temp/volume*force->nktv2p;
+  }
+
+  MPI_Allreduce(MPI_IN_PLACE,p_current_tensor_ev,3,MPI_DOUBLE,MPI_SUM,beads_comm);
+
+  for(int i=0; i<3; ++i){
+    p_current_tensor_avg[i]+=p_current_tensor_ev[i]/(double)np;
+    //p_current_tensor_avg[i]+=p_current_tensor_ev[i];
+  }
+
+
+/*
+  double *t_tensor=temperature->vector;
   temperature->compute_vector();
   pressure->compute_vector();
   compute_temp_vector();
 
   double *p_current_tensor_p=pressure->vector;
-  double *t_tensor=temperature->vector;
-  double *t_tensor_nm=t_current_vector;
   double volume=domain->xprd*domain->yprd*domain->zprd;
 
   double virial[3];
@@ -3593,12 +3745,13 @@ void FixPIMD::compute_pressure_vector()
   }
 
   for(int i=0; i<3; ++i){
-    p_current_tensor_p[i]-=virial[i]/volume;
-    p_current_tensor_p[i]-=atom->natoms*boltz*t_tensor[i]/volume;
+    p_current_tensor_p[i]-=virial[i]/volume*force->nktv2p;
+    p_current_tensor_p[i]-=atom->natoms*boltz*t_tensor[i]/volume*force->nktv2p;
   }
 
   //dU/dV
   MPI_Allreduce(MPI_IN_PLACE,p_current_tensor_p,3,MPI_DOUBLE,MPI_SUM,beads_comm);
+
   for(int i=0; i<3; ++i){
     p_current_tensor_p[i]/=(double)np;
   }
@@ -3611,10 +3764,11 @@ void FixPIMD::compute_pressure_vector()
   }
 
   for(int i=0; i<3; ++i){
-    p_current_tensor_p[i]+=virial[i]/volume;
-    p_current_tensor_p[i]+=atom->natoms*boltz*t_tensor_nm[i]/volume;
+    p_current_tensor_p[i]+=virial[i]/volume*force->nktv2p;
+    p_current_tensor_p[i]+=atom->natoms*boltz*t_tensor_nm[i]/volume*force->nktv2p+100.;
   }
   MPI_Allreduce(p_current_tensor_p,p_current_tensor_avg,3,MPI_DOUBLE,MPI_SUM,world);
+*/
 
 /*
 //  if(universe->me==0)
@@ -4326,8 +4480,8 @@ std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn(const std::vector<double>
             int beta_grid=100; //beta grid
             
             beta_n=(int)(beta*V.at(m))/beta_grid+1;
-            if (universe->me ==0)
-              printf("beta: %d, beta_n: %d, V(m): %f \n", (int)beta, beta_n, V.at(m));
+            //if (universe->me ==0)
+            //  printf("beta: %d, beta_n: %d, V(m): %f \n", (int)beta, beta_n, V.at(m));
 
             //partition beta for the sake of numerical stability.
             sig_denom_m = (double)m*exp(-beta*(V.at(m))/(double)beta_n);
