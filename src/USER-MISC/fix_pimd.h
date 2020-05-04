@@ -297,16 +297,21 @@ class FixPIMD : public Fix {
   FILE *pimdfile;  // pimd log file
 
   //BOSONIC PIMD
+  double Pc_longest;
   double sEl;
+  double ke_boson_vir;
   std::vector<double> E_kn;
   std::vector<double> V;
-  std::vector<double> save_E_kn;
-  std::vector<std::vector<double>> dV;
+  //std::vector<std::vector<double>> dV;
+  //CM
+  //std::vector<double> ke_boson;
+  double Evaluate_ke_boson(const std::vector <double>& V, const std::vector <double>& save_E_kn);
 
   double Evaluate_Ekn(const int n, const int k);
   std::vector<double> Evaluate_VBn(std::vector <double>& V, const int n);
   std::vector<double> Evaluate_dEkn_on_atom(const int n, const int k, const int atomnum);
   std::vector<std::vector<double>> Evaluate_dVBn(const std::vector <double>& V, const std::vector <double>& save_E_kn, const int n);
+  void observe_Pc_longest();
 
  protected:
   int dimension, which;

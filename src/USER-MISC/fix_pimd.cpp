@@ -59,6 +59,7 @@
 #include "error.h"
 
 //CM
+#include "output.h"
 #include <float.h>
 #include "group.h"
 #include "neighbor.h"
@@ -106,7 +107,7 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
   sp         = 1.0;
   //CM
   boltz = force->boltz;
-  sEl=0.5;
+  sEl=1.0;
 
   pe = NULL;
 
@@ -729,18 +730,24 @@ void FixPIMD::init()
   }
 
   if(universe->me==0) fprintf(pimdfile, "\n***************************************** Nuclei STATISTICS *****************************************\n");
+  if(universe->me==0) fprintf(pimdfile, "1. BOLTZMANN (distingiushable) - default 2. BOSON (indistinguishable) 3. FERMION (indistinguishable) - to be implemented\n");
   if(method_statistics==BOLTZMANN)
-    if(universe->me==0) fprintf(pimdfile, " - Please note that nuclei follow distinguishable BOLTZMANN statistics (default).\n");
+    if(universe->me==0) fprintf(pimdfile, " - Nuclei follow 1. distinguishable BOLTZMANN statistics (default).\n");
   if(method_statistics==BOSON)
-    if(universe->me==0) fprintf(pimdfile, " - Please note that nuclei obey indistinguishable BOSON statistics rather than BOLTZMANN.\n");
+    if(universe->me==0) fprintf(pimdfile, " - Nuclei follow 2. indistinguishable BOSON statistics (check if your nuclei are boson!).\n");
   if(universe->me==0) fprintf(pimdfile, "*****************************************************************************************************\n");
 
-  if(universe->me==0) fprintf(pimdfile, "\nStep       Temp (K)       Volume       Pressure       E_consv. (K)      E_tot (K/ptcl)    PE (K/ptcl)   KE(K/ptcl)\n");
+  if (pstat_flag && mpchain){
+    if(universe->me==0) fprintf(pimdfile, "\nStep       Temp (K)       Volume       Pressure       E_consv. (K)      E_tot (K/ptcl)    PE (K/ptcl)   KE(K/ptcl)\n");}
+  else{
+    if(universe->me==0) fprintf(pimdfile, "\nStep       Temp (K)       E_tot (K/ptcl)    PE (K/ptcl)   KE(K/ptcl)   Pc_long\n");}
 
-  E_kn=std::vector<double>((atom->natoms * (atom->natoms + 1) / 2),0.0);
-  V=std::vector<double>((atom->natoms + 1),0.0);
-  save_E_kn=std::vector<double>((atom->natoms*(atom->natoms+1)/2),0.0);
-  dV=std::vector<std::vector<double>>(atom->natoms*universe->nworlds, std::vector<double>(3, 0.0));
+  Pc_longest=0.0;
+  if(method_statistics==BOSON){
+    E_kn=std::vector<double>((atom->natoms * (atom->natoms + 1) / 2),0.0);
+    V=std::vector<double>((atom->natoms + 1),0.0);
+    //dV=std::vector<std::vector<double>>(atom->natoms*universe->nworlds, std::vector<double>(3, 0.0));
+  }
 }
 
 /* ---------------------------------------------------------------------- */
@@ -897,7 +904,7 @@ void FixPIMD::initial_integrate(int /*vflag*/)
   //observe_temp_scalar();
 
 //  if (pstat_flag && mpchain)
-  if(update->ntimestep%10==0){
+  if(update->ntimestep%output->thermo_every==0){
     monitor_observable();
   }
 
@@ -1399,6 +1406,7 @@ void FixPIMD::nmpimd_init()
 
   int iworld = universe->iworld;
 
+  //normal mode mass 
   for(int i=1; i<=atom->ntypes; i++)
   {
     mass[i] = atom->mass[i];
@@ -1412,6 +1420,17 @@ void FixPIMD::nmpimd_init()
   //  if (logfile){
   //    fprintf(logfile,"Normal mode mass for %d mode = "
   //                    "%.4f \n", iworld, mass[i]);}
+  }
+
+  //CM 
+  //normal mode velocity rescaling 
+  if(iworld)
+  {
+    for(int i=0;i<atom->nlocal;i++){
+      for(int j=0;j<3;j++){
+      atom->v[i][j]/=sqrt(lam[iworld]);
+      }
+    }
   }
 }
 
@@ -1529,13 +1548,21 @@ void FixPIMD::spring_force()
     V.at(0) = 0.0;
     //energy
     E_kn = Evaluate_VBn(V, atom->natoms);
+    //Prob. of the longest polymer  
+    observe_Pc_longest();
     //force
-    dV = Evaluate_dVBn(V,E_kn,atom->natoms);
+    //dV = Evaluate_dVBn(V,E_kn,atom->natoms);
+    Evaluate_dVBn(V,E_kn,atom->natoms);
+    //ke
+    //for(int i=0; i<atom->natoms*(atom->natoms+1)/2; i++){ 
+    //  if (universe->me ==0){ 
+    //    printf("E_kn: %e \n", E_kn.at(i));}
+    //}
+    ke_boson_vir=Evaluate_ke_boson(V, E_kn);
   }
   else if(method_statistics==FERMION){
 
   }
-
 }
 
 /* ----------------------------------------------------------------------
@@ -3317,13 +3344,27 @@ void FixPIMD::observe_etot()
   //etot+=dimension*atom->natoms*boltz*t_current_avg/2.;
   //etot+=3.0*atom->natoms*boltz*t_current_avg/2.;
 
-  //pe
-  observe_pe_avg();
-  petot+=pe_current_avg;
-  //ke
-  ketot+=3.0*atom->natoms*boltz*nhc_temp/2.;
-  observe_virial_avg();
-  ketot+=vir_current_avg;
+  if(method_statistics==BOLTZMANN){
+    //pe
+    observe_pe_avg();
+    petot+=pe_current_avg;
+    //ke
+    ketot+=3.0*atom->natoms*boltz*nhc_temp/2.;
+    observe_virial_avg();
+    ketot+=vir_current_avg;
+  }
+  else if(method_statistics==BOSON){
+    //pe
+    observe_pe_avg();
+    petot+=pe_current_avg;
+    //ke
+    ketot+=3.0*np*atom->natoms*boltz*nhc_temp/2.;
+    ketot+=ke_boson_vir;
+    //for(int i=0; i<atom->natoms; i++){ 
+    //  if (universe->me ==0){ 
+    //    printf("V: %e \n", V.at(i));}
+    //}
+  }
   //etot
   etot=petot+ketot;
 }
@@ -3553,18 +3594,14 @@ void FixPIMD::observe_temp_scalar()
 //Monitor obervable 
 void FixPIMD::monitor_observable()
 {
-  //temp observe
-  observe_temp_scalar();
-  //pressure
-  double pressure_current = 1.0/3.0 * (p_current[0] + p_current[1] + p_current[2]);
-  //double pressure_current =  (p_current[0] + p_current[1] + p_current[2]);
-
-  //etot
-  observe_etot();
-  //E_consv
-  observe_E_consv();
-
+  //NPT
   if (pstat_flag && mpchain){
+    //temp observe
+    observe_temp_scalar();
+    //pressure
+    double pressure_current = 1.0/3.0 * (p_current[0] + p_current[1] + p_current[2]);
+    //E_consv
+    observe_E_consv();
     if(universe->me==0){
       if (pimdfile){
         fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f    %f\n", 
@@ -3577,14 +3614,19 @@ void FixPIMD::monitor_observable()
       }
     }
   }
+  //NVT
   else{
+    //temp observe
+    observe_temp_scalar();
+    //etot
+    observe_etot();
     if(universe->me==0){
       if (pimdfile){
         //fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f\n", update->ntimestep, t_current_avg, vol_current, pressure_current, E_consv, etot/boltz/atom->natoms, vir_current_avg/boltz/atom->natoms);
         //fprintf(pimdfile, "%d    %f    %f  \n", update->ntimestep, t_current_avg, vol_current);
-        fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f\n", 
-                          update->ntimestep, t_current_avg, vol_current, pressure_current, 
-                          etot/boltz/atom->natoms, petot/boltz/atom->natoms, ketot/boltz/atom->natoms);
+        fprintf(pimdfile, "%d    %f    %f    %f    %f    %f\n", 
+                          update->ntimestep, t_current_avg, 
+                          etot/boltz/atom->natoms, petot/boltz/atom->natoms, ketot/boltz/atom->natoms, Pc_longest);
 //        fprintf(pimdfile, "%f    %f    %f \n", eta_E_sum, etap_E_sum, omega_E);
       }
     }
@@ -4286,17 +4328,75 @@ double FixPIMD::compute_scalar()
 
 
 /*
-
 Particle symmetry: Boson
 
 */
+
+double FixPIMD::Evaluate_ke_boson(const std::vector<double> &V, const std::vector<double> &save_E_kn)
+{
+  int n=atom->natoms;
+  double numerator;
+  double beta   = 1.0 / (boltz * nhc_temp);
+  double Emax;
+  int beta_n; //partitioning beta for the low temp. limit
+  int beta_grid=100; //beta grid
+  //double E_kn_tmp;
+
+  //bosonic kinetic energy
+  //ke_boson=std::vector<double>((atom->natoms + 1),0.0);
+  std::vector<double> ke_boson(n+1, 0.0);
+
+  int count = 0;
+  for (int m = 1; m < n+1; ++m) {
+    numerator=0.0;
+    Emax = sEl*(Evaluate_Ekn(m,1)+V.at(m-1));
+    for (int k = m; k > 0; --k) {
+      //E_kn_tmp = Evaluate_Ekn(m,k);
+      //if (universe->me ==0)  printf("keboson: %e / save_E_kn: %e / V: %e / Emax: %e \n", ke_boson.at(m-k), save_E_kn.at(count), V.at(m-k), Emax);
+      numerator += (ke_boson.at(m-k)-save_E_kn.at(count))*exp(-beta*(save_E_kn.at(count) + V.at(m-k) - Emax));
+      //if (universe->me ==0)  printf("E_kn(%d,%d): %e, save_E_kn(%d): %e \n", m, k, E_kn_tmp, count, save_E_kn.at(count));
+      //if (universe->me ==0)  printf("V(%d-%d): %e, Emax: %e \n", m, k, V.at(m-k), Emax);
+      //if (universe->me ==0)  printf("save_E_kn: %e \n", save_E_kn.at(count));
+      if(std::isnan(numerator) || std::isinf(numerator)) {
+        if (universe->me ==0){
+          printf("E_kn(%d,%d): %e, numerator: %e \n", m, k, save_E_kn.at(count), numerator);}
+      }
+      count++;
+    }
+    //if (universe->iworld ==0) printf("V(m-1): %e \n", V.at(m));
+
+    beta_n=(int)(beta*(V.at(m) - Emax))/beta_grid+1;
+    double sig_denom_m = exp(-beta*(V.at(m) - Emax)/(double)beta_n);
+
+    //if (universe->iworld ==0) printf("sig_denom_m: %e \n", sig_denom_m);
+
+    if(sig_denom_m ==0 || std::isnan(sig_denom_m) || std::isinf(sig_denom_m) || std::isnan(numerator) || std::isinf(numerator)) {
+      if (universe->iworld ==0){
+        std::cout << "m is: "<< m << " V.at(m-1) is " <<V.at(m-1)<< " beta is: " << beta << " sig_denom_m is: " <<sig_denom_m << std::endl;
+      }
+      exit(0);
+    }
+
+    for(int ib=0; ib<beta_n; ib++){
+      if(ib==0){
+        ke_boson.at(m) = numerator/sig_denom_m/(double)m;}
+      else{
+        ke_boson.at(m) /= sig_denom_m;
+      }
+    }
+  //if (universe->iworld ==0) printf("ke_boson: %e\n", ke_boson.at(m));
+  }
+  return ke_boson.at(n);
+}
 
 std::vector<double> FixPIMD::Evaluate_VBn(std::vector <double>& V, const int n)
 {
   double sig_denom;
   double Elongest;
-  double E_kn;
+  double Ekn;
   double beta   = 1.0 / (boltz * nhc_temp);
+  //save_E_kn=std::vector<double>((atom->natoms*(atom->natoms+1)/2),0.0);
+  std::vector<double> save_E_kn(n*(n+1)/2, 0.0);
 
   int count = 0;
   for (int m = 1; m < n+1; ++m) {
@@ -4305,8 +4405,8 @@ std::vector<double> FixPIMD::Evaluate_VBn(std::vector <double>& V, const int n)
     Elongest = sEl*(Evaluate_Ekn(m,1)+V.at(m-1));
     //for (int k = 1; k <m+1; ++k) {
     for (int k = m; k > 0; --k) {
-      E_kn = Evaluate_Ekn(m,k);
-      save_E_kn.at(count) = E_kn;
+      Ekn = Evaluate_Ekn(m,k);
+      save_E_kn.at(count) = Ekn;
 //      if(k==1){
 //        //!BH! I had to add 0.5 below in order to not get sigma which is zero or inf for large systems
 //        //CM we choose the maximum value (-\beta*E)
@@ -4318,11 +4418,11 @@ std::vector<double> FixPIMD::Evaluate_VBn(std::vector <double>& V, const int n)
 //        //if (universe->me ==0)
 //        //  printf("Elongest/sEl: %f, %f \n", Elongest, sEl);
 //      }
-      sig_denom += exp(-beta*(E_kn + V.at(m-k)-Elongest));
+      sig_denom += exp(-beta*(Ekn + V.at(m-k)-Elongest));
 
       if(std::isnan(sig_denom) || std::isinf(sig_denom)) {
         if (universe->me ==0){
-          printf("E_kn(%d,%d): %f, sig_denom: %f \n", m, k, E_kn, sig_denom);}
+          printf("E_kn(%d,%d): %f, sig_denom: %f \n", m, k, Ekn, sig_denom);}
         //std::cout << "m is: "<<m << " k is: " <<k << " E_kn is: " << E_kn << " V.at(m-k) is: " << V.at(m - k) << " Elongest is: " << Elongest
         //          << " V.at(m-1) is " <<V.at(m-1)<< " beta is: " << beta << " sig_denom is: " <<sig_denom << std::endl ;}
       }
@@ -4437,103 +4537,100 @@ std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn(const std::vector<double>
   int nlocal = atom->nlocal;
   double sig_denom_m;
 
+  int beta_n; //partitioning beta for the low temp. limit
+  int beta_grid=100; //beta grid
+
   std::vector<std::vector<double>> dV_all(n, std::vector<double>(3,0.0));
   //std::cout<<dV_all.at(0).size()<<std::endl;
 
   for (int atomnum = 0; atomnum < nlocal; ++atomnum) {
+    std::vector<std::vector<double>> dV(n+1, std::vector<double>(3,0.0));
+    dV.at(0) = {0.0,0.0,0.0};
 
-      std::vector<std::vector<double>> dV(n+1, std::vector<double>(3,0.0));
-      dV.at(0) = {0.0,0.0,0.0};
+    for (int m = 1; m < n + 1; ++m) {
+      std::vector<double> sig(3,0.0);
 
-      for (int m = 1; m < n + 1; ++m) {
+      if (atomnum > m-1) {
+        dV.at(m) = {0.0,0.0,0.0};
+      }else{
+        int count = m*(m-1)/2;
 
-        std::vector<double> sig(3,0.0);
+        //double Elongest = sEl*(save_E_kn.at(m*(m-1)/2)+V.at(m-1));
+        //double Elongest = sEl*(save_E_kn.at(0)+V.at(0)+V.at(m));
+        //double Elongest = save_E_kn.at(m*(m-1)/2);
 
-        if (atomnum > m-1) {
-          dV.at(m) = {0.0,0.0,0.0};
-        }else{
+        double Emax = sEl*(Evaluate_Ekn(m,1)+V.at(m-1));
+        for (int k = m; k > 0; --k) {
+          std::vector<double> dE_kn(3,0.0);
+          dE_kn = Evaluate_dEkn_on_atom(m,k,atomnum);
 
-          //for (int k = 1; k < m + 1; ++k) {
-          int count = m*(m-1)/2;
-
-	  //!BH! I had to add 0.5 below in order to not get sigma which is zero or inf for large systems
-          //double Elongest = sEl*(save_E_kn.at(m*(m-1)/2)+V.at(m-1));
-          double Elongest = 0.5*(save_E_kn.at(0)+V.at(0)+V.at(m));
-	  //double Elongest = save_E_kn.at(m*(m-1)/2);
-          //std::cout<<"Elongest: "<<Elongest<<std::endl;
-
-            for (int k = m; k > 0; --k) {
-                std::vector<double> dE_kn(3,0.0);
-                dE_kn = Evaluate_dEkn_on_atom(m,k,atomnum);
-
-                sig.at(0) += (dE_kn.at(0) + dV.at(m - k).at(0)) * exp(-beta * (save_E_kn.at(count) + V.at(m - k)));
-                sig.at(1) += (dE_kn.at(1) + dV.at(m - k).at(1)) * exp(-beta * (save_E_kn.at(count) + V.at(m - k)));
-                sig.at(2) += (dE_kn.at(2) + dV.at(m - k).at(2)) * exp(-beta * (save_E_kn.at(count) + V.at(m - k)));
+          sig.at(0) += (dE_kn.at(0) + dV.at(m - k).at(0))*exp(-beta*(save_E_kn.at(count) + V.at(m - k) - Emax));
+          sig.at(1) += (dE_kn.at(1) + dV.at(m - k).at(1))*exp(-beta*(save_E_kn.at(count) + V.at(m - k) - Emax));
+          sig.at(2) += (dE_kn.at(2) + dV.at(m - k).at(2))*exp(-beta*(save_E_kn.at(count) + V.at(m - k) - Emax));
  
-                //if (universe->me ==0){
-                //  printf("E_kn(%d): %e, V(%d-%d): %e, V(%d): %e \n", count, save_E_kn.at(count),m,k, V.at(m - k), m, V.at(m));}
+          //if (universe->me ==0){
+          //  printf("E_kn(%d): %e, V(%d-%d): %e, V(%d): %e \n", count, save_E_kn.at(count),m,k, V.at(m - k), m, V.at(m));}
+          //if (universe->me ==0) printf("sig: %e \n", sig.at(0));
 
-                count++;
-            }
+          count++;
+        }
 
-            int beta_n; //partitioning beta for the low temp. limit
-            int beta_grid=100; //beta grid
-            
-            beta_n=(int)(beta*V.at(m))/beta_grid+1;
-            //if (universe->me ==0)
-            //  printf("beta: %d, beta_n: %d, V(m): %f \n", (int)beta, beta_n, V.at(m));
+        beta_n=(int)(beta*(V.at(m)-Emax))/beta_grid+1;
+        //if (universe->me ==0)
+        //  printf("beta: %d, beta_n: %d, V(m): %f \n", (int)beta, beta_n, V.at(m));
 
-            //partition beta for the sake of numerical stability.
-            sig_denom_m = (double)m*exp(-beta*(V.at(m))/(double)beta_n);
+        //partition beta for the sake of numerical stability.
+        sig_denom_m = exp(-beta*(V.at(m)-Emax)/(double)beta_n);
 
-	    if(sig_denom_m ==0 || std::isnan(sig_denom_m) || std::isinf(sig_denom_m) || std::isnan(sig.at(0)) || std::isinf(sig.at(0))) {
-	      if (universe->iworld ==0){
-		std::cout << "m is: "<< m << " Elongest is: " << Elongest << " V.at(m-1) is " <<V.at(m-1)<< " beta is: " << beta << " sig_denom_m is: " <<sig_denom_m << std::endl;
-	      }
-	      exit(0);
-	    }
+        if(sig_denom_m ==0 || std::isnan(sig_denom_m) || std::isinf(sig_denom_m) || std::isnan(sig.at(0)) || std::isinf(sig.at(0))) {
+          if (universe->iworld ==0){
+            std::cout << "m is: "<< m << " Emax is: " << Emax << " V.at(m-1) is " <<V.at(m-1)<< " beta is: " << beta << " sig_denom_m is: " <<sig_denom_m << std::endl;
+          }
+          exit(0);
+        }
 
-            for(int ib=0; ib<beta_n; ib++){
-              if(ib==0){
-                dV.at(m).at(0) = sig.at(0) / sig_denom_m;
-                dV.at(m).at(1) = sig.at(1) / sig_denom_m;
-                dV.at(m).at(2) = sig.at(2) / sig_denom_m;}
-              else{
-                dV.at(m).at(0) /= sig_denom_m;
-                dV.at(m).at(1) /= sig_denom_m;
-                dV.at(m).at(2) /= sig_denom_m;
-              }
-            }
+        for(int ib=0; ib<beta_n; ib++){
+          if(ib==0){
+            dV.at(m).at(0) = sig.at(0)/sig_denom_m/(double)m;
+            dV.at(m).at(1) = sig.at(1)/sig_denom_m/(double)m;
+            dV.at(m).at(2) = sig.at(2)/sig_denom_m/(double)m;}
+          else{
+            dV.at(m).at(0) /= sig_denom_m;
+            dV.at(m).at(1) /= sig_denom_m;
+            dV.at(m).at(2) /= sig_denom_m;
+          }
+        }
 
-	    if(std::isinf(dV.at(m).at(0)) || std::isnan(dV.at(m).at(0))) {
-	      if (universe->iworld ==0){
-                std::cout << " Elongest is: " << Elongest
-                          << " V.at(m) is " << V.at(m) << " beta is " << beta << std::endl;}
-	      exit(0);
-	    }
+        if(std::isinf(dV.at(m).at(0)) || std::isnan(dV.at(m).at(0))) {
+          if (universe->iworld ==0){
+            std::cout << " Elongest is: " << Emax
+                      << " V.at(m) is " << V.at(m) << " beta is " << beta << std::endl;}
+          exit(0);
         }
       }
+    }
 
-      /*if(bead==0 &&atomnum==0)
-          std::cout <<"atom: " << atomnum+1 <<" bead: "<< bead+1 << " dV: " << dV.at(n).at(0)<<" "<< dV.at(n).at(1)<< " "<<dV.at(n).at(2) <<std::endl;
+    /*if(bead==0 &&atomnum==0)
+        std::cout <<"atom: " << atomnum+1 <<" bead: "<< bead+1 << " dV: " << dV.at(n).at(0)<<" "<< dV.at(n).at(1)<< " "<<dV.at(n).at(2) <<std::endl;
+    */
+
+    //std::cout<<"index: " <<(atomnum)*np + (bead)<<std::endl;
+    dV_all.at((atomnum)).at(0) = dV.at(n).at(0);
+    dV_all.at((atomnum)).at(1) = dV.at(n).at(1);
+    dV_all.at((atomnum)).at(2) = dV.at(n).at(2);
+
+    /*if(bead==0)
+        std::cout <<"atom: " << atomnum+1 <<" bead: "<< bead+1 << " fbefore: " << f[atomnum][0]<<" "<< f[atomnum][1]<< " "<<f[atomnum][2] <<std::endl;
+    */
+
+    f[atomnum][0] -= dV.at(n).at(0);
+    f[atomnum][1] -= dV.at(n).at(1);
+    f[atomnum][2] -= dV.at(n).at(2);
+    //if (universe->me ==0) printf("spring force: %e \n", dV.at(n).at(0));
+
+    /*if(bead==0)
+        std::cout <<"atom: " << atomnum+1 <<" bead: "<< bead+1 << " fafter: " << f[atomnum][0]<<" "<< f[atomnum][1]<< " "<<f[atomnum][2] <<std::endl;
       */
-
-      //std::cout<<"index: " <<(atomnum)*np + (bead)<<std::endl;
-      dV_all.at((atomnum)).at(0) = dV.at(n).at(0);
-      dV_all.at((atomnum)).at(1) = dV.at(n).at(1);
-      dV_all.at((atomnum)).at(2) = dV.at(n).at(2);
-
-      /*if(bead==0)
-          std::cout <<"atom: " << atomnum+1 <<" bead: "<< bead+1 << " fbefore: " << f[atomnum][0]<<" "<< f[atomnum][1]<< " "<<f[atomnum][2] <<std::endl;
-      */
-
-      f[atomnum][0] -= dV.at(n).at(0);
-      f[atomnum][1] -= dV.at(n).at(1);
-      f[atomnum][2] -= dV.at(n).at(2);
-
-      /*if(bead==0)
-          std::cout <<"atom: " << atomnum+1 <<" bead: "<< bead+1 << " fafter: " << f[atomnum][0]<<" "<< f[atomnum][1]<< " "<<f[atomnum][2] <<std::endl;
-        */
   }
   return dV_all;
 }
@@ -4620,3 +4717,10 @@ std::vector<double> FixPIMD::Evaluate_dEkn_on_atom(const int n, const int k, con
     return res;
   }
 }
+
+void FixPIMD::observe_Pc_longest()
+{
+  double beta = 1.0 / (boltz * nhc_temp);
+  int n=atom->natoms;
+  Pc_longest=(double)(n-1)*exp(-beta*(Evaluate_Ekn(n,n)-V.at(n)));
+} 
