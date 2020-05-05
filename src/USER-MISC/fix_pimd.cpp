@@ -122,7 +122,7 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
   drag = 0.0;
   nc_pchain = 1;
   nc_tchain = 1;
-  dimension=3;
+  dimension=domain->dimension;
   flipflag = 1;
 
   omega_mass_flag = 0;
@@ -562,8 +562,10 @@ void FixPIMD::init()
   fbond = - _fbond * force->mvv2e;
 
   if(universe->me==0) fprintf(pimdfile, "\n********************************************** UNITS **********************************************\n");
-  if(universe->me==0)
-    fprintf(pimdfile, " -P/(beta^2 * hbar^2) = %20.7lE (kcal/mol/A^2)\n", fbond);
+  if(universe->me==0){
+    fprintf(pimdfile, " * -P/(beta^2 * hbar^2) = %20.7lE (kcal/mol/A^2)\n", fbond);
+    fprintf(pimdfile, " * Dimension of the system = %d\n", dimension);
+  }
   if(universe->me==0) fprintf(pimdfile, "*****************************************************************************************************\n");
 
 //  // CM 
