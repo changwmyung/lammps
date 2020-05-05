@@ -4349,7 +4349,8 @@ double FixPIMD::Evaluate_ke_boson(const std::vector<double> &V, const std::vecto
   int count = 0;
   for (int m = 1; m < n+1; ++m) {
     numerator=0.0;
-    Emax = sEl*(Evaluate_Ekn(m,1)+V.at(m-1));
+//    Emax = sEl*(Evaluate_Ekn(m,1)+V.at(m-1));
+    Emax=std::min((Evaluate_Ekn(m,1)+V.at(m-1)), (Evaluate_Ekn(m,m)+V.at(0)));
     for (int k = m; k > 0; --k) {
       //E_kn_tmp = Evaluate_Ekn(m,k);
       //if (universe->me ==0)  printf("keboson: %e / save_E_kn: %e / V: %e / Emax: %e \n", ke_boson.at(m-k), save_E_kn.at(count), V.at(m-k), Emax);
@@ -4365,14 +4366,15 @@ double FixPIMD::Evaluate_ke_boson(const std::vector<double> &V, const std::vecto
     }
     //if (universe->iworld ==0) printf("V(m-1): %e \n", V.at(m));
 
-    beta_n=(int)(beta*(V.at(m) - Emax))/beta_grid+1;
+//    beta_n=(int)(beta*(V.at(m) - Emax))/beta_grid+1;
+    beta_n=(int)(abs(beta*(V.at(m) - Emax)))/beta_grid+1;
     double sig_denom_m = exp(-beta*(V.at(m) - Emax)/(double)beta_n);
 
     //if (universe->iworld ==0) printf("sig_denom_m: %e \n", sig_denom_m);
 
     if(sig_denom_m ==0 || std::isnan(sig_denom_m) || std::isinf(sig_denom_m) || std::isnan(numerator) || std::isinf(numerator)) {
       if (universe->iworld ==0){
-        std::cout << "m is: "<< m << " V.at(m-1) is " <<V.at(m-1)<< " beta is: " << beta << " sig_denom_m is: " <<sig_denom_m << std::endl;
+        std::cout << "m is: "<< m << " V.at(m) is " <<V.at(m)<< " beta is: " << beta << " sig_denom_m is: " <<sig_denom_m << std::endl;
       }
       exit(0);
     }
@@ -4402,7 +4404,8 @@ std::vector<double> FixPIMD::Evaluate_VBn(std::vector <double>& V, const int n)
   for (int m = 1; m < n+1; ++m) {
     sig_denom = 0.0;
     //max of -beta*E
-    Elongest = sEl*(Evaluate_Ekn(m,1)+V.at(m-1));
+//    Elongest = sEl*(Evaluate_Ekn(m,1)+V.at(m-1));
+    Elongest = std::min((Evaluate_Ekn(m,1)+V.at(m-1)), (Evaluate_Ekn(m,m)+V.at(0)));
     //for (int k = 1; k <m+1; ++k) {
     for (int k = m; k > 0; --k) {
       Ekn = Evaluate_Ekn(m,k);
@@ -4422,7 +4425,8 @@ std::vector<double> FixPIMD::Evaluate_VBn(std::vector <double>& V, const int n)
 
       if(std::isnan(sig_denom) || std::isinf(sig_denom)) {
         if (universe->me ==0){
-          printf("E_kn(%d,%d): %f, sig_denom: %f \n", m, k, Ekn, sig_denom);}
+//          printf("E_kn(%d,%d): %f, sig_denom: %f \n", m, k, Ekn, sig_denom);}
+          printf("E_kn(%d,%d): %e, V.at(m-k):%e, Elongest: %e, sig_denom: %e \n", m, k, Ekn, V.at(m-k), Elongest, sig_denom);}
         //std::cout << "m is: "<<m << " k is: " <<k << " E_kn is: " << E_kn << " V.at(m-k) is: " << V.at(m - k) << " Elongest is: " << Elongest
         //          << " V.at(m-1) is " <<V.at(m-1)<< " beta is: " << beta << " sig_denom is: " <<sig_denom << std::endl ;}
       }
@@ -4559,7 +4563,8 @@ std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn(const std::vector<double>
         //double Elongest = sEl*(save_E_kn.at(0)+V.at(0)+V.at(m));
         //double Elongest = save_E_kn.at(m*(m-1)/2);
 
-        double Emax = sEl*(Evaluate_Ekn(m,1)+V.at(m-1));
+//        double Emax = sEl*(Evaluate_Ekn(m,1)+V.at(m-1));
+        double Emax=std::min((Evaluate_Ekn(m,1)+V.at(m-1)), (Evaluate_Ekn(m,m)+V.at(0)));
         for (int k = m; k > 0; --k) {
           std::vector<double> dE_kn(3,0.0);
           dE_kn = Evaluate_dEkn_on_atom(m,k,atomnum);
@@ -4575,7 +4580,7 @@ std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn(const std::vector<double>
           count++;
         }
 
-        beta_n=(int)(beta*(V.at(m)-Emax))/beta_grid+1;
+        beta_n=(int)(abs(beta*(V.at(m)-Emax)))/beta_grid+1;
         //if (universe->me ==0)
         //  printf("beta: %d, beta_n: %d, V(m): %f \n", (int)beta, beta_n, V.at(m));
 
