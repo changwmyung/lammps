@@ -563,7 +563,9 @@ void FixPIMD::init()
 
   if(universe->me==0) fprintf(pimdfile, "\n********************************************** UNITS **********************************************\n");
   if(universe->me==0){
-    fprintf(pimdfile, " * -P/(beta^2 * hbar^2) = %20.7lE (kcal/mol/A^2)\n", fbond);
+    fprintf(pimdfile, " * LAMMPS internal units = %s \n", update->unit_style);
+    fprintf(pimdfile, " * Boltzmann constant = %20.7lE \n", boltz);
+    fprintf(pimdfile, " * -P/(beta^2 * hbar^2) = %20.7lE \n", fbond);
     fprintf(pimdfile, " * Dimension of the system = %d\n", dimension);
   }
   if(universe->me==0) fprintf(pimdfile, "*****************************************************************************************************\n");
@@ -3351,7 +3353,7 @@ void FixPIMD::observe_etot()
     observe_pe_avg();
     petot+=pe_current_avg;
     //ke
-    ketot+=3.0*atom->natoms*boltz*nhc_temp/2.;
+    ketot+=dimension*atom->natoms*boltz*nhc_temp/2.;
     observe_virial_avg();
     ketot+=vir_current_avg;
   }
@@ -3360,7 +3362,7 @@ void FixPIMD::observe_etot()
     observe_pe_avg();
     petot+=pe_current_avg;
     //ke
-    ketot+=3.0*np*atom->natoms*boltz*nhc_temp/2.;
+    ketot+=dimension*np*atom->natoms*boltz*nhc_temp/2.;
     ketot+=ke_boson_vir;
     //for(int i=0; i<atom->natoms; i++){ 
     //  if (universe->me ==0){ 
@@ -4729,5 +4731,6 @@ void FixPIMD::observe_Pc_longest()
 {
   double beta = 1.0 / (boltz * nhc_temp);
   int n=atom->natoms;
-  Pc_longest=(double)(n-1)*exp(-beta*(Evaluate_Ekn(n,n)-V.at(n)));
+  double degen=1./(double)(n);
+  Pc_longest=degen*exp(-beta*(Evaluate_Ekn(n,n)-V.at(n)));
 } 
