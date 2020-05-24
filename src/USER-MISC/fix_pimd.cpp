@@ -293,16 +293,6 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
   if (p_flag[4]) p_freq[4] = 1.0 / p_period[4];
   if (p_flag[5]) p_freq[5] = 1.0 / p_period[5];
 
-  int nlocal0=atom->nlocal;
-  //position copy
-  x_buff = new double*[nlocal0];
-  for(int i = 0; i < 3; ++i)
-      x_buff[i] = new double[3];
-
-  memory->grow(fpre, atom->nlocal, 3, "FixPIMD::fpre");
-  memory->grow(xc, atom->nlocal, 3, "FixPIMD::xc");
-  memory->grow(fc, atom->nlocal, 3, "FixPIMD::fc");
-
 //  xc = new double*[180];
 //  for(int i = 0; i < 3; i++)
 //      xc[i] = new double[3];
@@ -331,6 +321,16 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
   int ich;
   
   //if(universe->me==0) printf("memory start\n");
+
+//  int nlocal0=atom->nlocal;
+//  //position copy
+//  x_buff = new double*[nlocal0];
+//  for(int i = 0; i < 3; ++i)
+//      x_buff[i] = new double[3];
+
+  memory->grow(fpre, atom->natoms, 3, "FixPIMD::fpre");
+  memory->grow(xc,   atom->natoms, 3, "FixPIMD::xc");
+  memory->grow(fc,   atom->natoms, 3, "FixPIMD::fc");
 
   //allocating memory for array
   //eta = new double[max][mtchain];
@@ -790,9 +790,11 @@ void FixPIMD::setup(int vflag)
       if (pstyle == ISO){ 
         //pressure->compute_scalar();
         compute_pressure_scalar();
+        //if(universe->me==0) printf("pressure scalar computed. \n");
         if (pcouple == XYZ){
           //pressure->compute_vector();
-              compute_pressure_vector();
+          compute_pressure_vector();
+          //if(universe->me==0) printf("pressure vector computed. \n");
           }
         }
       if (pstyle == TRICLINIC){ 
@@ -895,22 +897,28 @@ void FixPIMD::setup(int vflag)
 
   if(universe->me==0 && screen) fprintf(screen,"Finished setting up Path-Integral ...\n");
 
+  if(universe->me==0) printf("Setup finished! \n");
+
 }
 
 /* ---------------------------------------------------------------------- */
 
 void FixPIMD::initial_integrate(int /*vflag*/)
 {
+
+  //if(universe->me==0) printf("init integ. finished! \n");
+
   //CM update the centroid xc & fc
+  //uncomment later !
   update_x_centroid();
 
   //CM debug
   //observe_temp_scalar();
 
 //  if (pstat_flag && mpchain)
-  if(update->ntimestep%output->thermo_every==0){
-    monitor_observable();
-  }
+//  if(update->ntimestep%output->thermo_every==0){
+//    monitor_observable();
+//  }
 
   if (pstat_flag && mpchain){
 
@@ -1028,6 +1036,8 @@ void FixPIMD::initial_integrate(int /*vflag*/)
   nhc_update_v();
   nhc_update_x();
   }
+
+  //if(universe->me==0) printf("init integ. finished! \n");
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1142,6 +1152,8 @@ void FixPIMD::final_integrate()
   t_current = compute_temp_scalar();
   nhc_update_v();
   }
+
+  //if(universe->me==0) printf("fin integ. finished! \n");
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1152,14 +1164,17 @@ void FixPIMD::post_force(int /*flag*/)
   //if(universe->me==0){
   //  fprintf(pimdfile, "post_force!");} 
 
+  //if(universe->me==0) printf("nlocal:%d \n", atom->nlocal);
   //CM store bare forces before transformations
   for(int i=0; i<atom->nlocal; i++) for(int j=0; j<3; j++) fpre[i][j]=atom->f[i][j];
-
   for(int i=0; i<atom->nlocal; i++) for(int j=0; j<3; j++) atom->f[i][j] /= np;
 
+  //if(universe->me==0) printf("f centroid! \n");
   //CM store the centroid force
+  //need to uncomment later!
   update_f_centroid();
 
+  //if(universe->me==0) printf("nm-transform start! \n");
   comm_exec(atom->x);
   spring_force();
 
@@ -1178,6 +1193,7 @@ void FixPIMD::post_force(int /*flag*/)
     nmpimd_transform(buf_beads, atom->f, M_f2fp[universe->iworld]);
     
   }
+  //if(universe->me==0) printf("nm-transform finished! \n");
 }
 
 //CM
@@ -3214,19 +3230,23 @@ void FixPIMD::compute_temp_vector()
 //update the centroid forces
 void FixPIMD::update_f_centroid()
 {
+  //method 2 
+  nmpimd_fill(atom->f);
+  comm_exec(atom->f);
+  nmpimd_transform(buf_beads, fc, M_x2xp[0]);
 
-  //method 1
-  double ff[atom->nlocal][3];
-
-  for (int i = 0; i < atom->nlocal; i++) {
-    for(int j=0; j<3; j++){
-      ff[i][j]=fpre[i][j]/(double)np;
-    }
-  }
-
-  for(int i=0; i<atom->nlocal; i++){
-      MPI_Allreduce(ff[i],fc[i],3,MPI_DOUBLE,MPI_SUM,beads_comm); 
-  }
+//  //method 1
+//  double ff[atom->nlocal][3];
+//
+//  for (int i = 0; i < atom->nlocal; i++) {
+//    for(int j=0; j<3; j++){
+//      ff[i][j]=fpre[i][j]/(double)np;
+//    }
+//  }
+//
+//  for(int i=0; i<atom->nlocal; i++){
+//      MPI_Allreduce(ff[i],fc[i],3,MPI_DOUBLE,MPI_SUM,beads_comm); 
+//  }
 
 //  if(universe->me==23){
 //    printf("fc1:%d %f %f %f \n", atom->tag[120], fc[120][0], fc[120][1], fc[120][2]);
@@ -3263,6 +3283,8 @@ void FixPIMD::update_f_centroid()
 //update the centroid position
 void FixPIMD::update_x_centroid()
 {
+  // method 1 
+  /*
   double xx[atom->nlocal][3];
 
   for (int i = 0; i < atom->nlocal; i++) {
@@ -3270,24 +3292,6 @@ void FixPIMD::update_x_centroid()
       xx[i][j]=atom->x[i][j];
     }
   }
-
-//  if(universe->me==0){
-//    printf("xx0: %d %f %f %f \n", atom->tag[120],  xx[120][0], xx[120][1], xx[120][2]);
-//  }
-//
-//  if(universe->me==15){
-//    printf("xx15: %d %f %f %f \n", atom->tag[120], xx[120][0], xx[120][1], xx[120][2]);
-//  }
-//
-//  if(universe->me==31){
-//    printf("xx31: %d %f %f %f \n", atom->tag[120], xx[120][0], xx[120][1], xx[120][2]);
-//  }
-
-//  if(universe->me==0){
-//    printf("xx: %f %f %f \n", xx[120][0], xx[120][1], xx[120][2]);
-//  }
-
-  // method 1 
   for(int i=0; i<atom->nlocal; i++){
       MPI_Allreduce(xx[i],xc[i],3,MPI_DOUBLE,MPI_SUM,beads_comm); 
 //      MPI_Allreduce(xx[i],xc[i],3,MPI_DOUBLE,MPI_SUM,universe->uworld); 
@@ -3297,26 +3301,35 @@ void FixPIMD::update_x_centroid()
       xc[i][j]/=(double)np;
     }
   }
+  */
 
 //  if(universe->me==23){
 //    printf("xc1:%d %f %f %f \n", atom->tag[120], xc[120][0], xc[120][1], xc[120][2]);
 //  }
 
-//  //method 2 
-//  nmpimd_fill(atom->x);
-//  comm_exec(atom->x);
-//  nmpimd_transform(buf_beads, atom->x, M_x2xp[universe->iworld]);
-//
-//  for (int i = 0; i < atom->nlocal; i++) {
-//    for(int j=0; j<3; j++){
-//      xc[i][j]=atom->x[i][j];
-//    }
+//  if(universe->me==6){
+//    printf("xc1:%d %f %f %f \n", atom->tag[12], atom->x[12][0], atom->x[12][1], atom->x[12][2]);
+//  }
+
+  //method 2 
+  nmpimd_fill(atom->x);
+  comm_exec(atom->x);
+  nmpimd_transform(buf_beads, xc, M_x2xp[0]);
+
+//  if(universe->me==6){
+//    printf("xc1:%d %f %f %f \n", atom->tag[12], atom->x[12][0], atom->x[12][1], atom->x[12][2]);
 //  }
 //
-//  nmpimd_fill(atom->x);
-//  comm_exec(atom->x);
-//  nmpimd_transform(buf_beads, atom->x, M_xp2x[universe->iworld]);
-//
+//  if(universe->me==6){
+//    printf("xc1:%d %f %f %f \n", atom->tag[12], xc[12][0], xc[12][1], xc[12][2]);
+//  }
+
+//  for (int i = 0; i < atom->nlocal; i++) {
+//    for(int j=0; j<3; j++){
+//      xc[i][j]=xx[i][j];
+//    }
+//  }
+
 //  //broadcast the centroid 
 //  MPI_Barrier(universe->uworld);
 //  for(int i=0; i<atom->nlocal; i++){
