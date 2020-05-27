@@ -1567,18 +1567,20 @@ void FixPIMD::spring_force()
   else if(method_statistics==BOSON){ 
     V.at(0) = 0.0;
     //energy
-    E_kn = Evaluate_VBn(V, atom->natoms);
+//    E_kn = Evaluate_VBn(V, atom->natoms);
+    Evaluate_VBn_new(V, atom->natoms);
+
     //Prob. of the longest polymer  
-    observe_Pc_longest();
+//    observe_Pc_longest();
     //force
     //dV = Evaluate_dVBn(V,E_kn,atom->natoms);
-    Evaluate_dVBn(V,E_kn,atom->natoms);
+//    Evaluate_dVBn(V,E_kn,atom->natoms);
     //ke
     //for(int i=0; i<atom->natoms*(atom->natoms+1)/2; i++){ 
     //  if (universe->me ==0){ 
     //    printf("E_kn: %e \n", E_kn.at(i));}
     //}
-    ke_boson_vir=Evaluate_ke_boson(V, E_kn);
+//    ke_boson_vir=Evaluate_ke_boson(V, E_kn);
   }
   else if(method_statistics==FERMION){
 
@@ -4405,7 +4407,100 @@ double FixPIMD::Evaluate_ke_boson(const std::vector<double> &V, const std::vecto
     }
   //if (universe->iworld ==0) printf("ke_boson: %e\n", ke_boson.at(m));
   }
+
   return ke_boson.at(n);
+}
+
+//std::vector<double> FixPIMD::Evaluate_VBn_new(std::vector <double>& V, const int n)
+void FixPIMD::Evaluate_VBn_new(std::vector <double>& V, const int n)
+{
+  double sig_denom;
+  double Elongest;
+  double Ekn;
+  double beta   = 1.0 / (boltz * nhc_temp);
+  std::vector<double> save_E_kn(n*(n+1)/2, 0.0);
+
+  //temp. mearsure for mpi
+  double save_E_kn_arr[n*(n+1)/2];
+  double V_arr[n+1];
+  for (int ii=0;ii<n+1;ii++) V_arr[ii]=0.0;
+
+  int count = 0;
+  //for (int m = 1; m < n+1; ++m) {
+  for (int m = 1; m < n+1; ++m) {
+  //for (int m = 2; m < n+1; ++m) {
+  //for (int m = universe->me+1; m < n+1; m+=universe->nprocs) {
+    //if (universe->me ==0){
+    //  printf("m: %d \n", m);}
+    sig_denom = 0.0;
+    //max of -beta*E
+    //Elongest = std::min((Evaluate_Ekn(m,1)+V.at(m-1)), (Evaluate_Ekn(m,m)+V.at(0)));
+    Elongest = std::min((Evaluate_Ekn(m,1)+V_arr[m-1]), (Evaluate_Ekn(m,m)+V_arr[0]));
+    //for (int k = m; k > 0; --k) {
+    //for (int k = m-universe->me; k > 0; k-=universe->nprocs) {
+
+    //para-range
+    int iwork1=int(m/universe->nprocs);
+    int iwork2=int(m%universe->nprocs); 
+    int istart=universe->me*iwork1+1+std::min(universe->me, iwork2);
+    int iend=istart+iwork1-1;
+    if (iwork2>universe->me) iend=iend+1; 
+
+//    if (universe->me ==1)  printf("istart= %d \n", istart);
+//    double save_E_kn_arr_tmp[iend-istart+1];
+
+//    if (universe->me ==1)  printf("istart= %d \n", m-universe->me);
+
+    //for (int k = m; k > 0; --k) {
+    for (int k = m-universe->me; k > 0; k-=universe->nprocs) { //fastest
+    //for (int k = iend; k >= istart; --k) {
+      //Ekn = Evaluate_Ekn(m,k);
+      Ekn = Evaluate_Ekn_new(m,k);
+      //Ekn = 0.01;
+      //save_E_kn.at(count) = Ekn;
+      //save_E_kn_arr[count] = Ekn;
+      //MPI_Bcast(&save_E_kn_arr[count], 1, MPI_DOUBLE, int(k%universe->nprocs), universe->uworld);
+      //MPI_Bcast(&save_E_kn_arr[count], 1, MPI_DOUBLE, 0, universe->uworld);
+
+      //if (universe->me ==0)  printf("after eval ekn \n");
+
+      //sig_denom += exp(-beta*(Ekn + V.at(m-k)-Elongest));
+      sig_denom += exp(-beta*(Ekn + V_arr[m-k]-Elongest));
+
+      //if (universe->me ==0)  printf("after sig denom \n");
+
+      if(std::isnan(sig_denom) || std::isinf(sig_denom)) {
+        if (universe->me ==0){
+          //printf("E_kn(%d,%d): %e, V.at(m-k):%e, Elongest: %e, sig_denom: %e \n", m, k, Ekn, V.at(m-k), Elongest, sig_denom);}
+          printf("E_kn(%d,%d): %e, V.at(m-k):%e, Elongest: %e, sig_denom: %e \n", m, k, Ekn, V_arr[m-k], Elongest, sig_denom);}
+      }
+      count++;
+    }
+
+    //MPI_Barrier(universe->uworld);
+    //sum sig denom
+    MPI_Allreduce(MPI_IN_PLACE,&sig_denom,1,MPI_DOUBLE,MPI_SUM,universe->uworld);
+
+    //V.at(m) = Elongest-1.0/beta*log(sig_denom / (double)m);
+    V_arr[m] = Elongest-1.0/beta*log(sig_denom / (double)m);
+    //MPI_Bcast(&V_arr[m], 1, MPI_DOUBLE, 0, universe->uworld);
+
+    if(std::isinf(V.at(m)) || std::isnan(V.at(m))) {
+	if (universe->me ==0){
+          std::cout << "sig_denom is: " << sig_denom << " Elongest is: " << Elongest
+                    << std::endl;}
+          exit(0);
+    }
+  }
+
+  //copy arr to vector
+//  unsigned int arr_size=sizeof(save_E_kn_arr)/sizeof(double);
+//  save_E_kn.insert(save_E_kn.end(), &save_E_kn_arr[0], &save_E_kn_arr[arr_size]);
+
+  unsigned int arr_size=sizeof(V_arr)/sizeof(double);
+  V.insert(V.end(), &V_arr[0], &V_arr[arr_size]);
+
+//  return save_E_kn;
 }
 
 std::vector<double> FixPIMD::Evaluate_VBn(std::vector <double>& V, const int n)
@@ -4463,6 +4558,79 @@ std::vector<double> FixPIMD::Evaluate_VBn(std::vector <double>& V, const int n)
     //std::cout<< sig_denom << " " <<  log (sig_denom / (double)m) << " " << beta <<std::endl;
   }
   return save_E_kn;
+}
+
+double FixPIMD::Evaluate_Ekn_new(const int n, const int k)
+{
+  double omega_sq = omega_np*omega_np;
+//  int bead = universe->iworld;
+//  double **x = atom->x;
+  double* _mass = atom->mass;
+  int* type = atom->type;
+  int nlocal = atom->nlocal;
+
+  //sum over the spring energy of (n-k) particles
+  spring_energy = 0.0;
+  for (int ib=0;ib<np;ib++){
+      double* x_0 = buf_beads[ib];
+      double* x_1 = buf_beads[ib];
+    if(ib==np-1){
+      x_1 = buf_beads[0];
+    }else{
+      x_1 = buf_beads[ib+1];
+    }
+    //E_n^(k)(R_n-k+1,...,R_n) is a function of k atoms
+    x_0 += 3*(n-k);
+    x_1 += 3*(n-k);
+
+    if(ib==np-1 && k > 1) x_1 += 3;
+
+    for (int i = n-k; i < n ; ++i) {
+      double delx = x_1[0] - x_0[0];
+      double dely = x_1[1] - x_0[1];
+      double delz = x_1[2] - x_0[2];
+
+      domain->minimum_image(delx, dely, delz);
+
+      if (ib==np-1 && i==n-2) {
+        x_1 = buf_beads[0];
+        x_1 += 3*(n-k);
+      } else x_1 += 3;
+      spring_energy += 0.5*_mass[type[i]]*omega_sq*(delx*delx + dely*dely + delz*delz);
+    }
+  }
+/*
+  //E_n^(k)(R_n-k+1,...,R_n) is a function of k atoms
+  xnext += 3*(n-k);
+
+  //np is total number of beads
+  if(bead == np-1 && k > 1) xnext += 3;
+
+  spring_energy = 0.0;
+  for (int i = n-k; i < n ; ++i) {
+    double delx = xnext[0] - x[i][0];
+    double dely = xnext[1] - x[i][1];
+    double delz = xnext[2] - x[i][2];
+
+    domain->minimum_image(delx, dely, delz);
+
+    if (bead == np - 1 && i == n - 2) {
+      xnext = buf_beads[x_next];
+      xnext += 3*(n - k);
+    } else xnext += 3;
+    spring_energy += 0.5*_mass[type[i]]*omega_sq*(delx*delx + dely*dely + delz*delz);
+  }
+  double energy_all = 0.0;
+  double energy_local = spring_energy;
+*/
+  //MPI_Allreduce(MPI_IN_PLACE,&energy_local,1,MPI_DOUBLE,MPI_SUM,universe->uworld);
+
+  double energy_local = spring_energy;
+  if(std::isnan(spring_energy)){
+    std::cout<< universe->iworld << " " << spring_energy <<" "<<std::endl;
+    exit(0);}
+
+  return energy_local;
 }
 
 //E_n^(k) is a function of k atoms (R_n-k+1,...,R_n) for a given n and k.

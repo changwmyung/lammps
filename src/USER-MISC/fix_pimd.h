@@ -313,6 +313,11 @@ class FixPIMD : public Fix {
   std::vector<std::vector<double>> Evaluate_dVBn(const std::vector <double>& V, const std::vector <double>& save_E_kn, const int n);
   void observe_Pc_longest();
 
+  //parallelization
+  //std::vector<double> Evaluate_VBn_new(std::vector <double>& V, const int n);
+  double Evaluate_Ekn_new(const int n, const int k);
+  void Evaluate_VBn_new(std::vector <double>& V, const int n);
+
  protected:
   int dimension, which;
 
