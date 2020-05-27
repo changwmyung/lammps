@@ -1567,8 +1567,8 @@ void FixPIMD::spring_force()
   else if(method_statistics==BOSON){ 
     V.at(0) = 0.0;
     //energy
-//    E_kn = Evaluate_VBn(V, atom->natoms);
     Evaluate_VBn_new(V, atom->natoms);
+    E_kn = Evaluate_VBn(V, atom->natoms);
 
     //Prob. of the longest polymer  
 //    observe_Pc_longest();
@@ -4451,11 +4451,12 @@ void FixPIMD::Evaluate_VBn_new(std::vector <double>& V, const int n)
 
 //    if (universe->me ==1)  printf("istart= %d \n", m-universe->me);
 
-    //for (int k = m; k > 0; --k) {
-    for (int k = m-universe->me; k > 0; k-=universe->nprocs) { //fastest
+    //for (int k = m-universe->me; k > 0; k-=universe->nprocs) { //fastest
+    for (int k = m; k > 0; --k) {
     //for (int k = iend; k >= istart; --k) {
       //Ekn = Evaluate_Ekn(m,k);
       Ekn = Evaluate_Ekn_new(m,k);
+      if (universe->me ==0)  printf("Ekn(%d,%d)=%e \n",m,k,Ekn);
       //Ekn = 0.01;
       //save_E_kn.at(count) = Ekn;
       //save_E_kn_arr[count] = Ekn;
@@ -4522,6 +4523,7 @@ std::vector<double> FixPIMD::Evaluate_VBn(std::vector <double>& V, const int n)
     for (int k = m; k > 0; --k) {
       Ekn = Evaluate_Ekn(m,k);
       save_E_kn.at(count) = Ekn;
+      if (universe->me ==0)  printf("(origianl) Ekn(%d,%d)=%e \n",m,k,Ekn);
 //      if(k==1){
 //        //!BH! I had to add 0.5 below in order to not get sigma which is zero or inf for large systems
 //        //CM we choose the maximum value (-\beta*E)
@@ -4573,7 +4575,7 @@ double FixPIMD::Evaluate_Ekn_new(const int n, const int k)
   spring_energy = 0.0;
   for (int ib=0;ib<np;ib++){
       double* x_0 = buf_beads[ib];
-      double* x_1 = buf_beads[ib];
+      double* x_1;
     if(ib==np-1){
       x_1 = buf_beads[0];
     }else{
@@ -4591,39 +4593,15 @@ double FixPIMD::Evaluate_Ekn_new(const int n, const int k)
       double delz = x_1[2] - x_0[2];
 
       domain->minimum_image(delx, dely, delz);
+      spring_energy += 0.5*_mass[type[i]]*omega_sq*(delx*delx + dely*dely + delz*delz);
 
+      x_0+=3;
       if (ib==np-1 && i==n-2) {
         x_1 = buf_beads[0];
         x_1 += 3*(n-k);
       } else x_1 += 3;
-      spring_energy += 0.5*_mass[type[i]]*omega_sq*(delx*delx + dely*dely + delz*delz);
     }
   }
-/*
-  //E_n^(k)(R_n-k+1,...,R_n) is a function of k atoms
-  xnext += 3*(n-k);
-
-  //np is total number of beads
-  if(bead == np-1 && k > 1) xnext += 3;
-
-  spring_energy = 0.0;
-  for (int i = n-k; i < n ; ++i) {
-    double delx = xnext[0] - x[i][0];
-    double dely = xnext[1] - x[i][1];
-    double delz = xnext[2] - x[i][2];
-
-    domain->minimum_image(delx, dely, delz);
-
-    if (bead == np - 1 && i == n - 2) {
-      xnext = buf_beads[x_next];
-      xnext += 3*(n - k);
-    } else xnext += 3;
-    spring_energy += 0.5*_mass[type[i]]*omega_sq*(delx*delx + dely*dely + delz*delz);
-  }
-  double energy_all = 0.0;
-  double energy_local = spring_energy;
-*/
-  //MPI_Allreduce(MPI_IN_PLACE,&energy_local,1,MPI_DOUBLE,MPI_SUM,universe->uworld);
 
   double energy_local = spring_energy;
   if(std::isnan(spring_energy)){
@@ -4669,10 +4647,10 @@ double FixPIMD::Evaluate_Ekn(const int n, const int k)
                   << std::endl;
     }*/
 
-    double delx = xnext[0] - x[i][0];
-    //std::cout<<  xnext[0] << std::endl;
-    double dely = xnext[1] - x[i][1];
-    double delz = xnext[2] - x[i][2];
+    double delx =x[i][0] - xnext[0]; 
+    double dely =x[i][1] - xnext[1]; 
+    double delz =x[i][2] - xnext[2]; 
+    //std::cout<< xnext[0] << std::endl;
 
     domain->minimum_image(delx, dely, delz);
 
