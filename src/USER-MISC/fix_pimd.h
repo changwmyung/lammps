@@ -290,6 +290,10 @@ class FixPIMD : public Fix {
   MPI_Group world_group;
   MPI_Group beads_group;
   MPI_Comm beads_comm;
+
+  MPI_Group prime_group;
+  MPI_Comm prime_comm;
+
   int beads_rank; 
   int beads_size;
 
@@ -302,7 +306,7 @@ class FixPIMD : public Fix {
   double ke_boson_vir;
   std::vector<double> E_kn;
   std::vector<double> V;
-  //std::vector<std::vector<double>> dV;
+  std::vector<std::vector<double>> dV;
   //CM
   //std::vector<double> ke_boson;
   double Evaluate_ke_boson(const std::vector <double>& V, const std::vector <double>& save_E_kn);
@@ -316,7 +320,8 @@ class FixPIMD : public Fix {
   //parallelization
   //std::vector<double> Evaluate_VBn_new(std::vector <double>& V, const int n);
   double Evaluate_Ekn_new(const int n, const int k);
-  void Evaluate_VBn_new(std::vector <double>& V, const int n);
+  std::vector<double> Evaluate_VBn_new(std::vector <double>& V, const int n);
+  std::vector<std::vector<double>> Evaluate_dVBn_new(const std::vector <double>& V, const std::vector <double>& save_E_kn, const int n);
 
  protected:
   int dimension, which;

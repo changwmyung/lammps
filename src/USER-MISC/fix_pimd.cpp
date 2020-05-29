@@ -698,8 +698,8 @@ void FixPIMD::init()
   printf("WORLD RANK/SIZE: %d/%d --- BEADS RANK/SIZE: %d/%d\n",
     world_rank, world_size, beads_rank, beads_size);
 
-//  // Get the group of processes in MPI_COMM_WORLD
-//  MPI_Comm_group(universe->uworld, &world_group);
+  // Get the group of processes in MPI_COMM_WORLD
+  MPI_Comm_group(universe->uworld, &world_group);
 //  //MPI_Comm_group(MPI_COMM_WORLD, &world_group);
 //
 //  // Construct a group containing all of the prime ranks for beads communications
@@ -750,7 +750,7 @@ void FixPIMD::init()
   if(method_statistics==BOSON){
     E_kn=std::vector<double>((atom->natoms * (atom->natoms + 1) / 2),0.0);
     V=std::vector<double>((atom->natoms + 1),0.0);
-    //dV=std::vector<std::vector<double>>(atom->natoms*universe->nworlds, std::vector<double>(3, 0.0));
+    dV=std::vector<std::vector<double>>(atom->natoms*universe->nworlds, std::vector<double>(3, 0.0));
   }
 }
 
@@ -1567,20 +1567,25 @@ void FixPIMD::spring_force()
   else if(method_statistics==BOSON){ 
     V.at(0) = 0.0;
     //energy
-    Evaluate_VBn_new(V, atom->natoms);
-    E_kn = Evaluate_VBn(V, atom->natoms);
+    //E_kn = Evaluate_VBn(V, atom->natoms);
 
     //Prob. of the longest polymer  
 //    observe_Pc_longest();
+
     //force
     //dV = Evaluate_dVBn(V,E_kn,atom->natoms);
-//    Evaluate_dVBn(V,E_kn,atom->natoms);
+
     //ke
     //for(int i=0; i<atom->natoms*(atom->natoms+1)/2; i++){ 
     //  if (universe->me ==0){ 
     //    printf("E_kn: %e \n", E_kn.at(i));}
     //}
 //    ke_boson_vir=Evaluate_ke_boson(V, E_kn);
+
+    //parallel ver.
+    E_kn=Evaluate_VBn_new(V, atom->natoms);
+    dV=Evaluate_dVBn_new(V,E_kn,atom->natoms);
+
   }
   else if(method_statistics==FERMION){
 
@@ -4412,8 +4417,12 @@ double FixPIMD::Evaluate_ke_boson(const std::vector<double> &V, const std::vecto
 }
 
 //std::vector<double> FixPIMD::Evaluate_VBn_new(std::vector <double>& V, const int n)
-void FixPIMD::Evaluate_VBn_new(std::vector <double>& V, const int n)
+std::vector<double> FixPIMD::Evaluate_VBn_new(std::vector <double>& V, const int n)
 {
+  int ngroups;
+  int* ranks;
+  double* save_E_kn_arr_mk;
+
   double sig_denom;
   double Elongest;
   double Ekn;
@@ -4422,6 +4431,7 @@ void FixPIMD::Evaluate_VBn_new(std::vector <double>& V, const int n)
 
   //temp. mearsure for mpi
   double save_E_kn_arr[n*(n+1)/2];
+
   double V_arr[n+1];
   for (int ii=0;ii<n+1;ii++) V_arr[ii]=0.0;
 
@@ -4430,14 +4440,31 @@ void FixPIMD::Evaluate_VBn_new(std::vector <double>& V, const int n)
   for (int m = 1; m < n+1; ++m) {
   //for (int m = 2; m < n+1; ++m) {
   //for (int m = universe->me+1; m < n+1; m+=universe->nprocs) {
-    //if (universe->me ==0){
-    //  printf("m: %d \n", m);}
+    //if (universe->me ==0)  printf("m: %d \n", m);
     sig_denom = 0.0;
     //max of -beta*E
     //Elongest = std::min((Evaluate_Ekn(m,1)+V.at(m-1)), (Evaluate_Ekn(m,m)+V.at(0)));
     Elongest = std::min((Evaluate_Ekn(m,1)+V_arr[m-1]), (Evaluate_Ekn(m,m)+V_arr[0]));
     //for (int k = m; k > 0; --k) {
     //for (int k = m-universe->me; k > 0; k-=universe->nprocs) {
+
+    //set-up communicator 
+    int prime_rank = -1, prime_size = -1, i;
+    if (m<np){
+      ngroups=m;
+      ranks=new int[m];
+      for (i=0;i<m;i++) ranks[i]=i;
+      MPI_Group_incl(world_group, m, ranks, &prime_group);
+      MPI_Comm_create_group(universe->uworld, prime_group, 0, &prime_comm);
+      
+      if (MPI_COMM_NULL != prime_comm) {
+        MPI_Comm_rank(prime_comm, &prime_rank);
+        MPI_Comm_size(prime_comm, &prime_size);
+      }  
+      //if (universe->me ==0){
+      //  for (i=0;i<m;i++) printf("m(%d): %d\n", m,ranks[i]);}
+      //printf("m(%d) UNIVERSE RANK/SIZE (total): %d/%d  PRIME RANK/SIZE: %d/%d\n", m, universe->me, universe->nprocs, prime_rank, prime_size);
+    }
 
     //para-range
     int iwork1=int(m/universe->nprocs);
@@ -4451,15 +4478,22 @@ void FixPIMD::Evaluate_VBn_new(std::vector <double>& V, const int n)
 
 //    if (universe->me ==1)  printf("istart= %d \n", m-universe->me);
 
-    //for (int k = m-universe->me; k > 0; k-=universe->nprocs) { //fastest
-    for (int k = m; k > 0; --k) {
-    //for (int k = iend; k >= istart; --k) {
+    //store mpi Ekn
+    double save_E_kn_arr_m[m];
+    for (int j=0;j<m;j++) save_E_kn_arr_m[j]=0.0;
+    //if (iend-istart+1>0) save_E_kn_arr_mk=new double[iend-istart+1];
+    //save_E_kn_arr_mk=new double[m];
+   
+    for (int k = m-universe->me; k > 0; k-=universe->nprocs) { //fastest
+    //for (int k = iend; k >= istart; --k) { //to collect Ekn
+      //count_k+=istart-1;
+    //for (int k = m; k > 0; --k) {
       //Ekn = Evaluate_Ekn(m,k);
       Ekn = Evaluate_Ekn_new(m,k);
-      if (universe->me ==0)  printf("Ekn(%d,%d)=%e \n",m,k,Ekn);
+      save_E_kn_arr_m[k-1] = Ekn;
+      //printf("Ekn(%d,%d)=%e \n",m,k,Ekn);
       //Ekn = 0.01;
       //save_E_kn.at(count) = Ekn;
-      //save_E_kn_arr[count] = Ekn;
       //MPI_Bcast(&save_E_kn_arr[count], 1, MPI_DOUBLE, int(k%universe->nprocs), universe->uworld);
       //MPI_Bcast(&save_E_kn_arr[count], 1, MPI_DOUBLE, 0, universe->uworld);
 
@@ -4477,13 +4511,23 @@ void FixPIMD::Evaluate_VBn_new(std::vector <double>& V, const int n)
       }
       count++;
     }
+ 
+    //gather E_kn
+    MPI_Allreduce(MPI_IN_PLACE,save_E_kn_arr_m,m,MPI_DOUBLE,MPI_SUM,universe->uworld);
+    int count_i=0;
+    for (int i=m*(m-1)/2;i<m*(m+1)/2;i++){
+      save_E_kn_arr[i]=save_E_kn_arr_m[count_i];
+      count_i++;
+    }
+//    MPI_Allgather(save_E_kn_arr_mk, iend-istart+1, MPI_DOUBLE, pe_current_beads, 1, MPI_DOUBLE, 0, universe->uworld);
+//    MPI_Allgatherv(&save_E_kn_arr_mk[0], iend-istart+1, MPI_DOUBLE, &save_E_kn_arr_m[0], recv_counts, MPI_DOUBLE, 0, universe->uworld);
 
     //MPI_Barrier(universe->uworld);
     //sum sig denom
     MPI_Allreduce(MPI_IN_PLACE,&sig_denom,1,MPI_DOUBLE,MPI_SUM,universe->uworld);
 
-    //V.at(m) = Elongest-1.0/beta*log(sig_denom / (double)m);
-    V_arr[m] = Elongest-1.0/beta*log(sig_denom / (double)m);
+    V.at(m) = Elongest-1.0/beta*log(sig_denom / (double)m);
+    //V_arr[m] = Elongest-1.0/beta*log(sig_denom / (double)m);
     //MPI_Bcast(&V_arr[m], 1, MPI_DOUBLE, 0, universe->uworld);
 
     if(std::isinf(V.at(m)) || std::isnan(V.at(m))) {
@@ -4492,16 +4536,23 @@ void FixPIMD::Evaluate_VBn_new(std::vector <double>& V, const int n)
                     << std::endl;}
           exit(0);
     }
+//    if (m<np){
+//      MPI_Group_free(&prime_group);
+//      MPI_Comm_free(&prime_comm);
+//    }
   }
 
+  delete[] ranks;
+  delete[] save_E_kn_arr_mk;
+
   //copy arr to vector
-//  unsigned int arr_size=sizeof(save_E_kn_arr)/sizeof(double);
-//  save_E_kn.insert(save_E_kn.end(), &save_E_kn_arr[0], &save_E_kn_arr[arr_size]);
+  unsigned int arr_size=sizeof(save_E_kn_arr)/sizeof(double);
+  save_E_kn.insert(save_E_kn.end(), &save_E_kn_arr[0], &save_E_kn_arr[arr_size]);
 
-  unsigned int arr_size=sizeof(V_arr)/sizeof(double);
-  V.insert(V.end(), &V_arr[0], &V_arr[arr_size]);
+//  unsigned int arr_size=sizeof(V_arr)/sizeof(double);
+//  V.insert(V.end(), &V_arr[0], &V_arr[arr_size]);
 
-//  return save_E_kn;
+  return save_E_kn;
 }
 
 std::vector<double> FixPIMD::Evaluate_VBn(std::vector <double>& V, const int n)
@@ -4523,7 +4574,7 @@ std::vector<double> FixPIMD::Evaluate_VBn(std::vector <double>& V, const int n)
     for (int k = m; k > 0; --k) {
       Ekn = Evaluate_Ekn(m,k);
       save_E_kn.at(count) = Ekn;
-      if (universe->me ==0)  printf("(origianl) Ekn(%d,%d)=%e \n",m,k,Ekn);
+      //if (universe->me ==0)  printf("(origianl) Ekn(%d,%d)=%e \n",m,k,Ekn);
 //      if(k==1){
 //        //!BH! I had to add 0.5 below in order to not get sigma which is zero or inf for large systems
 //        //CM we choose the maximum value (-\beta*E)
@@ -4695,6 +4746,92 @@ double FixPIMD::Evaluate_Ekn(const int n, const int k)
   //return energy_all;
   return energy_local;
 }
+
+std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn_new(const std::vector<double> &V, const std::vector<double> &save_E_kn, const int n) 
+{
+  double beta = 1.0 / (boltz * nhc_temp);
+  int bead = universe->iworld;
+  double **f = atom->f;
+  int nlocal = atom->nlocal;
+  double sig_denom_m;
+
+  int beta_n; //partitioning beta for the low temp. limit
+  int beta_grid=100; //beta grid
+
+  std::vector<std::vector<double>> dV_all(n, std::vector<double>(3,0.0));
+
+  for (int atomnum = 0; atomnum < nlocal; ++atomnum) {
+  //for (int k = m-universe->me; k > 0; k-=universe->nprocs) { //fastest
+  //for (int atomnum=universe->me; atomnum<nlocal; atomnum+=universe->nprocs) {
+    std::vector<std::vector<double>> dV(n+1, std::vector<double>(3,0.0));
+    dV.at(0) = {0.0,0.0,0.0};
+
+    for (int m = 1; m < n + 1; ++m) {
+      std::vector<double> sig(3,0.0);
+
+      if (atomnum > m-1) {
+        dV.at(m) = {0.0,0.0,0.0};
+      }else{
+
+        int count = m*(m-1)/2;
+
+        double Emax=std::min((Evaluate_Ekn_new(m,1)+V.at(m-1)), (Evaluate_Ekn_new(m,m)+V.at(0)));
+        //we should be careful at parallelizing this part.
+        for (int k = m; k > 0; --k) {
+        //for (int k = m-universe->me; k > 0; k-=universe->nprocs) { //fastest
+          std::vector<double> dE_kn(3,0.0);
+          dE_kn = Evaluate_dEkn_on_atom(m,k,atomnum);
+
+          sig.at(0) += (dE_kn.at(0) + dV.at(m - k).at(0))*exp(-beta*(save_E_kn.at(count) + V.at(m - k) - Emax));
+          sig.at(1) += (dE_kn.at(1) + dV.at(m - k).at(1))*exp(-beta*(save_E_kn.at(count) + V.at(m - k) - Emax));
+          sig.at(2) += (dE_kn.at(2) + dV.at(m - k).at(2))*exp(-beta*(save_E_kn.at(count) + V.at(m - k) - Emax));
+
+          count++;
+        }
+
+        beta_n=(int)(abs(beta*(V.at(m)-Emax)))/beta_grid+1;
+
+        sig_denom_m = exp(-beta*(V.at(m)-Emax)/(double)beta_n);
+
+        if(sig_denom_m ==0 || std::isnan(sig_denom_m) || std::isinf(sig_denom_m) || std::isnan(sig.at(0)) || std::isinf(sig.at(0))) {
+          if (universe->iworld ==0){
+            std::cout << "m is: "<< m << " Emax is: " << Emax << " V.at(m-1) is " <<V.at(m-1)<< " beta is: " << beta << " sig_denom_m is: " <<sig_denom_m << std::endl;
+          }
+          exit(0);
+        }
+
+        for(int ib=0; ib<beta_n; ib++){
+          if(ib==0){
+            dV.at(m).at(0) = sig.at(0)/sig_denom_m/(double)m;
+            dV.at(m).at(1) = sig.at(1)/sig_denom_m/(double)m;
+            dV.at(m).at(2) = sig.at(2)/sig_denom_m/(double)m;}
+          else{
+            dV.at(m).at(0) /= sig_denom_m;
+            dV.at(m).at(1) /= sig_denom_m;
+            dV.at(m).at(2) /= sig_denom_m;
+          }
+        }
+
+        if(std::isinf(dV.at(m).at(0)) || std::isnan(dV.at(m).at(0))) {
+          if (universe->iworld ==0){
+            std::cout << " Elongest is: " << Emax
+                      << " V.at(m) is " << V.at(m) << " beta is " << beta << std::endl;}
+          exit(0);
+        }
+      }
+    }
+
+    dV_all.at((atomnum)).at(0) = dV.at(n).at(0);
+    dV_all.at((atomnum)).at(1) = dV.at(n).at(1);
+    dV_all.at((atomnum)).at(2) = dV.at(n).at(2);
+
+    f[atomnum][0] -= dV.at(n).at(0);
+    f[atomnum][1] -= dV.at(n).at(1);
+    f[atomnum][2] -= dV.at(n).at(2);
+  }
+  return dV_all;
+}
+
 
 std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn(const std::vector<double> &V, const std::vector<double> &save_E_kn, const int n) 
 {
