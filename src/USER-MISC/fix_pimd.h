@@ -296,14 +296,17 @@ class FixPIMD : public Fix {
 
   int beads_rank; 
   int beads_size;
+  int world_rank, world_size;
 
   //CM output file 
   FILE *pimdfile;  // pimd log file
 
   //BOSONIC PIMD
+  double **buf_beads_tot;
   double Pc_longest;
   double sEl;
   double ke_boson_vir;
+  int* nlocal_info;
   std::vector<double> E_kn;
   std::vector<double> V;
   std::vector<std::vector<double>> dV;
@@ -322,6 +325,8 @@ class FixPIMD : public Fix {
   double Evaluate_Ekn_new(const int n, const int k);
   std::vector<double> Evaluate_VBn_new(std::vector <double>& V, const int n);
   std::vector<std::vector<double>> Evaluate_dVBn_new(const std::vector <double>& V, const std::vector <double>& save_E_kn, const int n);
+  void Gather_NM_info();
+  std::vector<double> Evaluate_dEkn_on_atom_new(const int n, const int k, const int atomnum);
 
  protected:
   int dimension, which;

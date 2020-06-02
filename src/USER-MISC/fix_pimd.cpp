@@ -457,6 +457,9 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
   max_nlocal = 0;
   buf_recv = NULL;
   buf_beads = NULL;
+  buf_beads_tot = NULL;
+
+  nlocal_info=NULL;
 
   size_plan = 0;
   plan_send = plan_recv = NULL;
@@ -691,7 +694,6 @@ void FixPIMD::init()
   printf("UNIVERSE RANK/SIZE (total): %d/%d --- WORLD i/n (partitions): %d/%d --- BEADS RANK/SIZE (beads): %d/%d\n",
     universe->me, universe->nprocs, universe->iworld, universe->nworlds, beads_rank, beads_size);
 
-  int world_rank, world_size;
   MPI_Comm_rank(world, &world_rank);
   MPI_Comm_size(world, &world_size);
 
@@ -747,6 +749,7 @@ void FixPIMD::init()
     if(universe->me==0) fprintf(pimdfile, "\nStep       Temp (K)       E_tot (K/ptcl)    PE (K/ptcl)   KE(K/ptcl)   Pc_long\n");}
 
   Pc_longest=0.0;
+
   if(method_statistics==BOSON){
     E_kn=std::vector<double>((atom->natoms * (atom->natoms + 1) / 2),0.0);
     V=std::vector<double>((atom->natoms + 1),0.0);
@@ -1566,6 +1569,9 @@ void FixPIMD::spring_force()
   }
   else if(method_statistics==BOSON){ 
     V.at(0) = 0.0;
+    //collect position array across all nlocal and beads
+    Gather_NM_info();
+
     //energy
     //E_kn = Evaluate_VBn(V, atom->natoms);
 
@@ -4356,6 +4362,46 @@ Particle symmetry: Boson
 
 */
 
+void FixPIMD::Gather_NM_info()
+/*
+A function that collects buf_beads info. across all N beads and M nlocals.
+*/
+{
+  int nlocal=atom->nlocal;
+  int offset=0;
+
+  //nlocal info for gatherv function
+  if(nlocal_info) delete [] nlocal_info;
+  nlocal_info = new int[world_size];
+
+  MPI_Allgather(&nlocal, 1, MPI_INT, nlocal_info, 1, MPI_INT, world);
+  printf("nlocal: %d, %d\n", nlocal_info[0], nlocal_info[1]);
+
+  //allocate buf_beads_tot
+  if(buf_beads_tot)
+  {
+    for(int i=0; i<np; i++) if(buf_beads_tot[i]) delete [] buf_beads_tot[i];
+    delete [] buf_beads_tot;
+  }
+  buf_beads_tot = new double* [np];
+  for(int i=0; i<np; i++) buf_beads_tot[i] = new double [3*atom->natoms];
+  for(int i=0; i<np; i++) for(int j=0; j<3*atom->natoms;j++) buf_beads_tot[i][j]=0.0;
+
+  //gather buf_baeds to buf_beads_tot
+  for (int j=0; j<world_rank; j++){
+    offset+=3*nlocal_info[j];}
+  for (int i=0; i<3*nlocal; i++){
+    buf_beads_tot[beads_rank][i+offset]=buf_beads[beads_rank][i];
+  }
+  //collect buf_beads_tot info
+  for (int ib=0; ib<np; ib++){
+    MPI_Allreduce(MPI_IN_PLACE, buf_beads_tot[ib], 3*atom->natoms, MPI_DOUBLE, MPI_SUM, universe->uworld);
+  }
+  //for(int i=0; i<np; i++) for(int j=0; j<3*atom->natoms;j++) printf("buf_beads_tot: %f \n", buf_beads_tot[i][j]);
+  //if(universe->me==0) for(int j=0; j<3*atom->natoms;j++) printf("buf_beads_tot: %f \n", buf_beads_tot[0][j]);
+
+}
+
 double FixPIMD::Evaluate_ke_boson(const std::vector<double> &V, const std::vector<double> &save_E_kn)
 {
   int n=atom->natoms;
@@ -4444,7 +4490,7 @@ std::vector<double> FixPIMD::Evaluate_VBn_new(std::vector <double>& V, const int
     sig_denom = 0.0;
     //max of -beta*E
     //Elongest = std::min((Evaluate_Ekn(m,1)+V.at(m-1)), (Evaluate_Ekn(m,m)+V.at(0)));
-    Elongest = std::min((Evaluate_Ekn(m,1)+V_arr[m-1]), (Evaluate_Ekn(m,m)+V_arr[0]));
+    Elongest = std::min((Evaluate_Ekn_new(m,1)+V_arr[m-1]), (Evaluate_Ekn_new(m,m)+V_arr[0]));
     //for (int k = m; k > 0; --k) {
     //for (int k = m-universe->me; k > 0; k-=universe->nprocs) {
 
@@ -4625,12 +4671,12 @@ double FixPIMD::Evaluate_Ekn_new(const int n, const int k)
   //sum over the spring energy of (n-k) particles
   spring_energy = 0.0;
   for (int ib=0;ib<np;ib++){
-      double* x_0 = buf_beads[ib];
-      double* x_1;
+    double* x_0 = buf_beads_tot[ib];
+    double* x_1;
     if(ib==np-1){
-      x_1 = buf_beads[0];
+      x_1 = buf_beads_tot[0];
     }else{
-      x_1 = buf_beads[ib+1];
+      x_1 = buf_beads_tot[ib+1];
     }
     //E_n^(k)(R_n-k+1,...,R_n) is a function of k atoms
     x_0 += 3*(n-k);
@@ -4648,7 +4694,7 @@ double FixPIMD::Evaluate_Ekn_new(const int n, const int k)
 
       x_0+=3;
       if (ib==np-1 && i==n-2) {
-        x_1 = buf_beads[0];
+        x_1 = buf_beads_tot[0];
         x_1 += 3*(n-k);
       } else x_1 += 3;
     }
@@ -4754,15 +4800,22 @@ std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn_new(const std::vector<dou
   double **f = atom->f;
   int nlocal = atom->nlocal;
   double sig_denom_m;
+  int offset=0;
 
   int beta_n; //partitioning beta for the low temp. limit
   int beta_grid=100; //beta grid
 
   std::vector<std::vector<double>> dV_all(n, std::vector<double>(3,0.0));
 
-  for (int atomnum = 0; atomnum < nlocal; ++atomnum) {
+  //offset for nlocal
+  for (int j=0; j<world_rank; j++) offset+=nlocal_info[j];
+
+  for (int atomnum = offset; atomnum < nlocal+offset; ++atomnum) {
+  //for (int atomnum = world_rank; atomnum < atom->natoms; atomnum+=world_size) {
+  //for (int atomnum = 0; atomnum < nlocal; ++atomnum) {
   //for (int k = m-universe->me; k > 0; k-=universe->nprocs) { //fastest
   //for (int atomnum=universe->me; atomnum<nlocal; atomnum+=universe->nprocs) {
+
     std::vector<std::vector<double>> dV(n+1, std::vector<double>(3,0.0));
     dV.at(0) = {0.0,0.0,0.0};
 
@@ -4780,7 +4833,7 @@ std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn_new(const std::vector<dou
         for (int k = m; k > 0; --k) {
         //for (int k = m-universe->me; k > 0; k-=universe->nprocs) { //fastest
           std::vector<double> dE_kn(3,0.0);
-          dE_kn = Evaluate_dEkn_on_atom(m,k,atomnum);
+          dE_kn = Evaluate_dEkn_on_atom_new(m,k,atomnum);
 
           sig.at(0) += (dE_kn.at(0) + dV.at(m - k).at(0))*exp(-beta*(save_E_kn.at(count) + V.at(m - k) - Emax));
           sig.at(1) += (dE_kn.at(1) + dV.at(m - k).at(1))*exp(-beta*(save_E_kn.at(count) + V.at(m - k) - Emax));
@@ -4821,13 +4874,14 @@ std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn_new(const std::vector<dou
       }
     }
 
+    //do we need this? if yes, need to mpi gather this!
     dV_all.at((atomnum)).at(0) = dV.at(n).at(0);
     dV_all.at((atomnum)).at(1) = dV.at(n).at(1);
     dV_all.at((atomnum)).at(2) = dV.at(n).at(2);
 
-    f[atomnum][0] -= dV.at(n).at(0);
-    f[atomnum][1] -= dV.at(n).at(1);
-    f[atomnum][2] -= dV.at(n).at(2);
+    f[atomnum-offset][0] -= dV.at(n).at(0);
+    f[atomnum-offset][1] -= dV.at(n).at(1);
+    f[atomnum-offset][2] -= dV.at(n).at(2);
   }
   return dV_all;
 }
@@ -4938,6 +4992,62 @@ std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn(const std::vector<double>
       */
   }
   return dV_all;
+}
+
+//dE_n^(k) is a function of k atoms (R_n-k+1,...,R_n) for a given n and k.
+std::vector<double> FixPIMD::Evaluate_dEkn_on_atom_new(const int n, const int k, const int atomnum)
+{
+  //omega^2, could use fbond instead?
+  double omega_sq = omega_np * omega_np;
+  double *_mass = atom->mass;
+  int *type = atom->type;
+
+  //dE_n^(k)(R_n-k+1,...,R_n) is a function of k atoms
+  if (atomnum < n-k or atomnum > n-1 ) { return std::vector<double>(3, 0.0); }
+  else {
+
+    //bead is the bead number of current replica. bead = 0,...,np-1.
+    int bead = universe->iworld;
+
+    double* x_0=buf_beads_tot[bead];
+    double* x_l=(bead==0)?buf_beads_tot[np-1]:buf_beads_tot[bead-1];
+    double* x_n=(bead==np-1)?buf_beads_tot[0]:buf_beads_tot[bead+1];
+
+    //dE_n^(k)(R_n-k+1,...,R_n) is a function of k atoms
+    //But derivative if for atom atomnum
+    x_n += 3 * (atomnum);
+    x_l += 3 * (atomnum);
+    x_0 += 3 * (atomnum);
+
+    if (bead == np - 1 && k > 1){
+      atomnum == n - 1 ? (x_n-= 3*(k - 1)) : (x_n += 3);
+    }
+
+    if (bead == 0 && k > 1){
+      atomnum == n-k ? (x_l+= 3*(k - 1)) : (x_l -= 3);
+    }
+
+    std::vector<double> res(3);
+    double delx1 = x_n[0] - x_0[0];
+    double dely1 = x_n[1] - x_0[1];
+    double delz1 = x_n[2] - x_0[2];
+    domain->minimum_image(delx1, dely1, delz1);
+
+    double delx2 = x_l[0] - x_0[0];
+    double dely2 = x_l[1] - x_0[1];
+    double delz2 = x_l[2] - x_0[2];
+    domain->minimum_image(delx2, dely2, delz2);
+
+    double dx = -1.0*(delx1 + delx2);
+    double dy = -1.0*(dely1 + dely2);
+    double dz = -1.0*(delz1 + delz2);
+
+    res.at(0) = _mass[type[atomnum]] * omega_sq * dx;
+    res.at(1) = _mass[type[atomnum]] * omega_sq * dy;
+    res.at(2) = _mass[type[atomnum]] * omega_sq * dz;
+
+    return res;
+  }
 }
 
 //dE_n^(k) is a function of k atoms (R_n-k+1,...,R_n) for a given n and k.
