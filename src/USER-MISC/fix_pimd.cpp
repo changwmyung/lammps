@@ -1574,12 +1574,17 @@ void FixPIMD::spring_force()
 
     //energy
     //E_kn = Evaluate_VBn(V, atom->natoms);
+    //if(universe->me==0) for (int i=0; i<atom->natoms*(atom->natoms+1)/2; i++) printf("(org) %d %e\n", i, E_kn.at(i));
+    //force
+    //dV = Evaluate_dVBn(V,E_kn,atom->natoms);
+
+    //parallel ver.
+    E_kn=Evaluate_VBn_new(V, atom->natoms);
+    //if(universe->me==0) for (int i=0; i<atom->natoms*(atom->natoms+1)/2; i++) printf("(vec) %d %e\n", i, E_kn.at(i));
+    dV=Evaluate_dVBn_new(V,E_kn,atom->natoms);
 
     //Prob. of the longest polymer  
 //    observe_Pc_longest();
-
-    //force
-    //dV = Evaluate_dVBn(V,E_kn,atom->natoms);
 
     //ke
     //for(int i=0; i<atom->natoms*(atom->natoms+1)/2; i++){ 
@@ -1588,9 +1593,6 @@ void FixPIMD::spring_force()
     //}
 //    ke_boson_vir=Evaluate_ke_boson(V, E_kn);
 
-    //parallel ver.
-    E_kn=Evaluate_VBn_new(V, atom->natoms);
-    dV=Evaluate_dVBn_new(V,E_kn,atom->natoms);
 
   }
   else if(method_statistics==FERMION){
@@ -4375,7 +4377,7 @@ A function that collects buf_beads info. across all N beads and M nlocals.
   nlocal_info = new int[world_size];
 
   MPI_Allgather(&nlocal, 1, MPI_INT, nlocal_info, 1, MPI_INT, world);
-  printf("nlocal: %d, %d\n", nlocal_info[0], nlocal_info[1]);
+  //printf("nlocal: %d, %d\n", nlocal_info[0], nlocal_info[1]);
 
   //allocate buf_beads_tot
   if(buf_beads_tot)
@@ -4490,7 +4492,7 @@ std::vector<double> FixPIMD::Evaluate_VBn_new(std::vector <double>& V, const int
     sig_denom = 0.0;
     //max of -beta*E
     //Elongest = std::min((Evaluate_Ekn(m,1)+V.at(m-1)), (Evaluate_Ekn(m,m)+V.at(0)));
-    Elongest = std::min((Evaluate_Ekn_new(m,1)+V_arr[m-1]), (Evaluate_Ekn_new(m,m)+V_arr[0]));
+    Elongest = std::min((Evaluate_Ekn_new(m,1)+V.at(m-1)), (Evaluate_Ekn_new(m,m)+V.at(0)));
     //for (int k = m; k > 0; --k) {
     //for (int k = m-universe->me; k > 0; k-=universe->nprocs) {
 
@@ -4545,8 +4547,8 @@ std::vector<double> FixPIMD::Evaluate_VBn_new(std::vector <double>& V, const int
 
       //if (universe->me ==0)  printf("after eval ekn \n");
 
-      //sig_denom += exp(-beta*(Ekn + V.at(m-k)-Elongest));
-      sig_denom += exp(-beta*(Ekn + V_arr[m-k]-Elongest));
+      sig_denom += exp(-beta*(Ekn + V.at(m-k)-Elongest));
+      //sig_denom += exp(-beta*(Ekn + V_arr[m-k]-Elongest));
 
       //if (universe->me ==0)  printf("after sig denom \n");
 
@@ -4560,10 +4562,10 @@ std::vector<double> FixPIMD::Evaluate_VBn_new(std::vector <double>& V, const int
  
     //gather E_kn
     MPI_Allreduce(MPI_IN_PLACE,save_E_kn_arr_m,m,MPI_DOUBLE,MPI_SUM,universe->uworld);
-    int count_i=0;
+    int count_i=m-1;
     for (int i=m*(m-1)/2;i<m*(m+1)/2;i++){
       save_E_kn_arr[i]=save_E_kn_arr_m[count_i];
-      count_i++;
+      count_i--;
     }
 //    MPI_Allgather(save_E_kn_arr_mk, iend-istart+1, MPI_DOUBLE, pe_current_beads, 1, MPI_DOUBLE, 0, universe->uworld);
 //    MPI_Allgatherv(&save_E_kn_arr_mk[0], iend-istart+1, MPI_DOUBLE, &save_E_kn_arr_m[0], recv_counts, MPI_DOUBLE, 0, universe->uworld);
@@ -4591,9 +4593,10 @@ std::vector<double> FixPIMD::Evaluate_VBn_new(std::vector <double>& V, const int
   delete[] ranks;
   delete[] save_E_kn_arr_mk;
 
+  //if(universe->me==0) for (int i=0; i<atom->natoms*(atom->natoms+1)/2; i++) printf("(arr) %d %e\n", i, save_E_kn_arr[i]);
   //copy arr to vector
   unsigned int arr_size=sizeof(save_E_kn_arr)/sizeof(double);
-  save_E_kn.insert(save_E_kn.end(), &save_E_kn_arr[0], &save_E_kn_arr[arr_size]);
+  save_E_kn.insert(save_E_kn.begin(), &save_E_kn_arr[0], &save_E_kn_arr[arr_size]);
 
 //  unsigned int arr_size=sizeof(V_arr)/sizeof(double);
 //  V.insert(V.end(), &V_arr[0], &V_arr[arr_size]);
@@ -4672,12 +4675,8 @@ double FixPIMD::Evaluate_Ekn_new(const int n, const int k)
   spring_energy = 0.0;
   for (int ib=0;ib<np;ib++){
     double* x_0 = buf_beads_tot[ib];
-    double* x_1;
-    if(ib==np-1){
-      x_1 = buf_beads_tot[0];
-    }else{
-      x_1 = buf_beads_tot[ib+1];
-    }
+    double* x_1 = (ib==np-1)?buf_beads_tot[0]:buf_beads_tot[ib+1];
+
     //E_n^(k)(R_n-k+1,...,R_n) is a function of k atoms
     x_0 += 3*(n-k);
     x_1 += 3*(n-k);
@@ -4811,8 +4810,8 @@ std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn_new(const std::vector<dou
   for (int j=0; j<world_rank; j++) offset+=nlocal_info[j];
 
   for (int atomnum = offset; atomnum < nlocal+offset; ++atomnum) {
-  //for (int atomnum = world_rank; atomnum < atom->natoms; atomnum+=world_size) {
   //for (int atomnum = 0; atomnum < nlocal; ++atomnum) {
+  //for (int atomnum = world_rank; atomnum < atom->natoms; atomnum+=world_size) {
   //for (int k = m-universe->me; k > 0; k-=universe->nprocs) { //fastest
   //for (int atomnum=universe->me; atomnum<nlocal; atomnum+=universe->nprocs) {
 
@@ -4831,9 +4830,9 @@ std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn_new(const std::vector<dou
         double Emax=std::min((Evaluate_Ekn_new(m,1)+V.at(m-1)), (Evaluate_Ekn_new(m,m)+V.at(0)));
         //we should be careful at parallelizing this part.
         for (int k = m; k > 0; --k) {
-        //for (int k = m-universe->me; k > 0; k-=universe->nprocs) { //fastest
           std::vector<double> dE_kn(3,0.0);
           dE_kn = Evaluate_dEkn_on_atom_new(m,k,atomnum);
+          //dE_kn = Evaluate_dEkn_on_atom(m,k,atomnum);
 
           sig.at(0) += (dE_kn.at(0) + dV.at(m - k).at(0))*exp(-beta*(save_E_kn.at(count) + V.at(m - k) - Emax));
           sig.at(1) += (dE_kn.at(1) + dV.at(m - k).at(1))*exp(-beta*(save_E_kn.at(count) + V.at(m - k) - Emax));
@@ -4882,6 +4881,8 @@ std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn_new(const std::vector<dou
     f[atomnum-offset][0] -= dV.at(n).at(0);
     f[atomnum-offset][1] -= dV.at(n).at(1);
     f[atomnum-offset][2] -= dV.at(n).at(2);
+    //if (universe->me ==0) printf("spring force_x (%d): %e \n", atomnum, -dV.at(n).at(0));
+    //printf("spring force_x (%d): %e \n", atomnum, -dV.at(n).at(0));
   }
   return dV_all;
 }
@@ -4985,7 +4986,7 @@ std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn(const std::vector<double>
     f[atomnum][0] -= dV.at(n).at(0);
     f[atomnum][1] -= dV.at(n).at(1);
     f[atomnum][2] -= dV.at(n).at(2);
-    //if (universe->me ==0) printf("spring force: %e \n", dV.at(n).at(0));
+    //if (universe->me ==0) printf("(original) spring force_x (%d): %e \n", atomnum, -dV.at(n).at(0));
 
     /*if(bead==0)
         std::cout <<"atom: " << atomnum+1 <<" bead: "<< bead+1 << " fafter: " << f[atomnum][0]<<" "<< f[atomnum][1]<< " "<<f[atomnum][2] <<std::endl;
@@ -5045,6 +5046,7 @@ std::vector<double> FixPIMD::Evaluate_dEkn_on_atom_new(const int n, const int k,
     res.at(0) = _mass[type[atomnum]] * omega_sq * dx;
     res.at(1) = _mass[type[atomnum]] * omega_sq * dy;
     res.at(2) = _mass[type[atomnum]] * omega_sq * dz;
+    //if (universe->me ==0 && atomnum==120) printf("spring force_x (%d) (%d,%d): %e \n", atomnum, n, k, res.at(0));
 
     return res;
   }
@@ -5128,6 +5130,7 @@ std::vector<double> FixPIMD::Evaluate_dEkn_on_atom(const int n, const int k, con
     res.at(2) = _mass[type[atomnum]] * omega_sq * dz;
 
     //std::cout << bead << ": " << res.at(0) << " " << res.at(1) << " " << res.at(2) << std::endl;
+    //if (universe->me ==0 && atomnum==120) printf("(original) spring force_x (%d) (%d,%d): %e \n", atomnum, n, k, res.at(0));
 
     return res;
   }
