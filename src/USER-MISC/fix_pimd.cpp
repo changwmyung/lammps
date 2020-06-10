@@ -2038,9 +2038,6 @@ void FixPIMD::couple()
     p_current[2] = tensor[2];
   }
 
-  if (!std::isfinite(p_current[0]) || !std::isfinite(p_current[1]) || !std::isfinite(p_current[2]))
-    error->all(FLERR,"Non-numeric pressure - simulation unstable");
-
   // switch order from xy-xz-yz to Voigt
 
   if (pstyle == TRICLINIC) {
@@ -2058,8 +2055,6 @@ void FixPIMD::couple()
     p_current[4] = tensor[4];
     p_current[5] = tensor[3];
 
-    if (!std::isfinite(p_current[3]) || !std::isfinite(p_current[4]) || !std::isfinite(p_current[5]))
-      error->all(FLERR,"Non-numeric pressure - simulation unstable");
   }
 }
 
@@ -4496,7 +4491,10 @@ std::vector<double> FixPIMD::Evaluate_VBn_new(std::vector <double>& V, const int
     //for (int k = m; k > 0; --k) {
     //for (int k = m-universe->me; k > 0; k-=universe->nprocs) {
 
+/*
     //set-up communicator 
+    //CM
+    //this causes error. repeatative creation of communicator would cause a serious error.
     int prime_rank = -1, prime_size = -1, i;
     if (m<np){
       ngroups=m;
@@ -4520,6 +4518,7 @@ std::vector<double> FixPIMD::Evaluate_VBn_new(std::vector <double>& V, const int
     int istart=universe->me*iwork1+1+std::min(universe->me, iwork2);
     int iend=istart+iwork1-1;
     if (iwork2>universe->me) iend=iend+1; 
+*/
 
 //    if (universe->me ==1)  printf("istart= %d \n", istart);
 //    double save_E_kn_arr_tmp[iend-istart+1];
