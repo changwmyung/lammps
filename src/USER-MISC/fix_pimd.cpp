@@ -72,12 +72,18 @@
 #include <stdio.h>
 //#include "respa.h"
 
+//CM
+//we use Eigen lib for diagonalization routine
+#include <Eigen/Dense>
+using namespace Eigen;
+
 using namespace LAMMPS_NS;
 using namespace FixConst;
 
 //CM 
 #define DELTAFLIP 0.1
 #define TILTMAX 1.5
+//#define TILTMAX 1000
 
 enum{PIMD,NMPIMD,CMD};
 
@@ -744,7 +750,7 @@ void FixPIMD::init()
   if(universe->me==0) fprintf(pimdfile, "*****************************************************************************************************\n");
 
   if (pstat_flag && mpchain){
-    if(universe->me==0) fprintf(pimdfile, "\nStep       Temp (K)       Volume       Pressure       E_consv. (K)      E_tot (K/ptcl)    PE (K/ptcl)   KE(K/ptcl)\n");}
+    if(universe->me==0) fprintf(pimdfile, "\nStep       Temp (K)       Volume       Pressure       E_consv. (K)      E_tot (K/ptcl)    PE (K/ptcl)   KE(K/ptcl)    Pc_long\n");}
   else{
     if(universe->me==0) fprintf(pimdfile, "\nStep       Temp (K)       E_tot (K/ptcl)    PE (K/ptcl)   KE(K/ptcl)   Pc_long\n");}
 
@@ -801,7 +807,7 @@ void FixPIMD::setup(int vflag)
           }
         }
       if (pstyle == TRICLINIC){ 
-        //pressure->compute_vector();
+        pressure->compute_vector();
         compute_pressure_vector();
       }
       couple();
@@ -918,10 +924,9 @@ void FixPIMD::initial_integrate(int /*vflag*/)
   //CM debug
   //observe_temp_scalar();
 
-//  if (pstat_flag && mpchain)
-//  if(update->ntimestep%output->thermo_every==0){
-//    monitor_observable();
-//  }
+  if(update->ntimestep%output->thermo_every==0){
+    monitor_observable();
+  }
 
   if (pstat_flag && mpchain){
 
@@ -1569,29 +1574,30 @@ void FixPIMD::spring_force()
   }
   else if(method_statistics==BOSON){ 
     V.at(0) = 0.0;
-    //collect position array across all nlocal and beads
-    Gather_NM_info();
 
     //energy
-    //E_kn = Evaluate_VBn(V, atom->natoms);
+    E_kn = Evaluate_VBn(V, atom->natoms);
     //if(universe->me==0) for (int i=0; i<atom->natoms*(atom->natoms+1)/2; i++) printf("(org) %d %e\n", i, E_kn.at(i));
     //force
-    //dV = Evaluate_dVBn(V,E_kn,atom->natoms);
+    dV = Evaluate_dVBn(V,E_kn,atom->natoms);
+    ke_boson_vir=Evaluate_ke_boson(V, E_kn);
+    //Prob. of the longest polymer  
+    observe_Pc_longest();
 
+/*
     //parallel ver.
+    //collect position array across all nlocal and beads
+    Gather_NM_info();
     E_kn=Evaluate_VBn_new(V, atom->natoms);
     //if(universe->me==0) for (int i=0; i<atom->natoms*(atom->natoms+1)/2; i++) printf("(vec) %d %e\n", i, E_kn.at(i));
     dV=Evaluate_dVBn_new(V,E_kn,atom->natoms);
-
-    //Prob. of the longest polymer  
-//    observe_Pc_longest();
+*/
 
     //ke
     //for(int i=0; i<atom->natoms*(atom->natoms+1)/2; i++){ 
     //  if (universe->me ==0){ 
     //    printf("E_kn: %e \n", E_kn.at(i));}
     //}
-//    ke_boson_vir=Evaluate_ke_boson(V, E_kn);
 
 
   }
@@ -2015,8 +2021,6 @@ void FixPIMD::couple()
     p_current[0] = p_current[1] = p_current[2] = ave;
     //p_current[0] = p_current[1] = p_current[2] = pressure_scalar;
 
-//  if(universe->me==0)
-//    printf("couple(xyz) pressure: %f \n", p_current[0]);
 
   } else if (pcouple == XY) {
     double ave = 0.5 * (tensor[0] + tensor[1]);
@@ -2033,9 +2037,9 @@ void FixPIMD::couple()
   } else {
 //    double ave = 1.0/3.0 * (tensor[0] + tensor[1] + tensor[2]);
 //    p_current[0] = p_current[1] = p_current[2] = ave;
-    p_current[0] = tensor[0];
-    p_current[1] = tensor[1];
-    p_current[2] = tensor[2];
+//    p_current[0] = p_current_tensor_avg[0];
+//    p_current[1] = p_current_tensor_avg[1];
+//    p_current[2] = p_current_tensor_avg[2];
   }
 
   // switch order from xy-xz-yz to Voigt
@@ -2051,10 +2055,16 @@ void FixPIMD::couple()
 //    p_current[0] = tensor[0];
 //    p_current[1] = tensor[1];
 //    p_current[2] = tensor[2];
+    double ave = 1.0/3.0 * (p_current_tensor_avg[0] + p_current_tensor_avg[1] + p_current_tensor_avg[2]);
+    p_current[0] = ave;
+    p_current[1] = ave;
+    p_current[2] = ave;
     p_current[3] = tensor[5];
     p_current[4] = tensor[4];
     p_current[5] = tensor[3];
 
+  if(universe->me==0)
+    printf("pressure: %f %f %f / %f %f %f\n", p_current[0], p_current[1],p_current[2], p_current[3], p_current[4], p_current[5]);
   }
 }
 
@@ -2104,7 +2114,14 @@ void FixPIMD::nh_omega_dot()
     hh[0][1]=hh[1][0]=h[5]; 
 
     //CM diagonalize the unit-cell
-    dsyevv3(hh, hh_eigv, h_eig);
+    //dsyevv3(hh, hh_eigv, h_eig);
+
+    Matrix3d Hmat;
+    for (int i=0; i<3; i++) for (int j=0; j<3; j++) Hmat(i,j)=hh[i][j];
+    SelfAdjointEigenSolver<Matrix3d> eigensolver(Hmat);
+    if (eigensolver.info() != Success) abort();
+    for (int i=0; i<3; i++) h_eig[i]=eigensolver.eigenvalues()(i);
+    for (int i=0; i<3; i++) for (int j=0; j<3; j++) hh_eigv[i][j]=eigensolver.eigenvectors()(i,j);
   }
 
   //CM
@@ -2117,11 +2134,9 @@ void FixPIMD::nh_omega_dot()
   else if (pstyle == TRICLINIC) {
     volume = h_eig[0]*h_eig[1]*h_eig[2];
     //CM print the nm mass
-    //if(universe->me==0){
-    //  if (pimdfile){
-    //    fprintf(pimdfile, "h, vol(tri) = (%f, %f, %f), %.4f \n", h_eig[0], h_eig[1], h_eig[2], volume);
-    //  }
-    //}
+    if(universe->me==0){
+      printf("h, vol(tri) = (%f, %f, %f), %.4f \n", h_eig[0], h_eig[1], h_eig[2], volume);
+    }
   }
 
   //broadcast volume to all 
@@ -2223,7 +2238,7 @@ void FixPIMD::nh_omega_dot_x()
   double f_omega,volume;
   double **x = atom->x;
   //CM position in eigenspace
-  double **xx;
+  double **xx, **hg_dot_in;
   int nlocal = atom->nlocal;
 
   double h[6];
@@ -2265,6 +2280,9 @@ void FixPIMD::nh_omega_dot_x()
   //for full-cell fluctuations
   //CM is this right? The matrix is one of the whole block by mpi parallelization. 
   else if (pstyle == TRICLINIC) {
+    if(universe->me==0){
+      printf("omega_dot: %e / %e / %e \n", omega_dot[0], omega_dot[1], omega_dot[2]);
+    }
     hg_dot[0][0]=omega_dot[0]; 
     hg_dot[1][1]=omega_dot[1]; 
     hg_dot[2][2]=omega_dot[2]; 
@@ -2274,14 +2292,51 @@ void FixPIMD::nh_omega_dot_x()
 
     //CM diagonalize the unit-cell momentum
     //dsyevc3(hg, eig);
-    dsyevv3(hg_dot, eigv, omega_dot_eig);
+    //for (int i=0; i<3; i++) for (int j=0; j<3; j++) hg_dot_in[i][j]=hg_dot[i][j];
+    //dsyevv3(hg_dot_in, eigv, omega_dot_eig);
+
+    //Eigen library for diagonalization
+    Matrix3d Hgdot;
+    for (int i=0; i<3; i++) for (int j=0; j<3; j++) Hgdot(i,j)=hg_dot[i][j];
+    SelfAdjointEigenSolver<Matrix3d> eigensolver(Hgdot);
+    if (eigensolver.info() != Success) abort();
+    for (int i=0; i<3; i++) omega_dot_eig[i]=eigensolver.eigenvalues()(i);
+    for (int i=0; i<3; i++) for (int j=0; j<3; j++) eigv[i][j]=eigensolver.eigenvectors()(i,j);
 
 //    if(universe->me==0){
-//      printf("eig: %f / %f / %f \n", omega_dot_eig[0], omega_dot_eig[1], omega_dot_eig[2]);
-//      printf("eigv: %f / %f / %f \n", eigv[0][0], eigv[0][1], eigv[0][2]);
-//      printf("eigv: %f / %f / %f \n", eigv[1][0], eigv[1][1], eigv[1][2]);
-//      printf("eigv: %f / %f / %f \n", eigv[2][0], eigv[2][1], eigv[2][2]);
+//     Matrix3f A;
+//     A << -4.270915e-01,-2.947423e-18,1.469828e-17,-2.947423e-18,-4.270915e-01,4.086609e-17,1.469828e-17,4.086609e-17,-4.270915e-01;
+//     std::cout << "Here is the matrix A:\n" << A << std::endl;
+//     SelfAdjointEigenSolver<Matrix3f> eigensolver(A);
+//     if (eigensolver.info() != Success) abort();
+//     std::cout << "The eigenvalues of A are:\n" << eigensolver.eigenvalues() << std::endl;
+//     std::cout << "Here's a matrix whose columns are eigenvectors of A \n"
+//          << "corresponding to these eigenvalues:\n"
+//          << eigensolver.eigenvectors() << std::endl;
+//     double eigen_eig[3];
+//     for (int i=0;i<3;i++){ 
+//       //double tmptmp=eigensolver.eigenvalues()(i);
+//       eigen_eig[i]=eigensolver.eigenvalues()(i);
+//     }
+//     //double pp = &eigen_eig[0];
+//     //VectorXd eigen_eig(3)=eigensolver.eigenvalues();
+//     //std::cout << "vectorXd" << eigen_eig << std::endl;
+//     //Eigen::Map<Matrix<double,3,RowMajor> >(pp,3) = eigensolver.eigenvalues();
+//     printf("Eigen eigenvalue: %e %e %e", eigen_eig[0], eigen_eig[1], eigen_eig[2]);
 //    }
+
+    if(universe->me==0){
+      printf("omega_dot_x\n");
+
+      printf("hg_dot: %e / %e / %e \n", hg_dot[0][0], hg_dot[0][1], hg_dot[0][2]);
+      printf("hg_dot: %e / %e / %e \n", hg_dot[1][0], hg_dot[1][1], hg_dot[1][2]);
+      printf("hg_dot: %e / %e / %e \n", hg_dot[2][0], hg_dot[2][1], hg_dot[2][2]);
+
+      printf("eig: %f / %f / %f \n", omega_dot_eig[0], omega_dot_eig[1], omega_dot_eig[2]);
+      printf("eigv: %e / %e / %e \n", eigv[0][0], eigv[0][1], eigv[0][2]);
+      printf("eigv: %e / %e / %e \n", eigv[1][0], eigv[1][1], eigv[1][2]);
+      printf("eigv: %e / %e / %e \n", eigv[2][0], eigv[2][1], eigv[2][2]);
+    }
 
 //    if(universe->me==0){
 //      printf("x: %f / %f / %f \n", x[0][0], x[0][1], x[0][2]);
@@ -2554,8 +2609,8 @@ void FixPIMD::remap()
   h[5]=domain->h[5];
 
 //  if(universe->me==0){
-//    printf("h: %f / %f / %f \n", h[0], h[1], h[2]);
-//    printf("h: %f / %f / %f \n", h[3], h[4], h[5]);
+//    printf("h(before): %f / %f / %f \n", h[0], h[1], h[2]);
+//    printf("h(before): %f / %f / %f \n", h[3], h[4], h[5]);
 //  }
 //
 //  if(universe->me==0){
@@ -2741,8 +2796,8 @@ void FixPIMD::remap()
     h[5]=h2[0][1]; 
   
 //    if(universe->me==0){
-//      printf("h: %f / %f / %f \n", h[0], h[1], h[2]);
-//      printf("h: %f / %f / %f \n", h[3], h[4], h[5]);
+//      printf("h(after): %f / %f / %f \n", h[0], h[1], h[2]);
+//      printf("h(after): %f / %f / %f \n", h[3], h[4], h[5]);
 //    }
 
     if (p_flag[0]) {
@@ -2954,7 +3009,13 @@ void FixPIMD::nhc_press_integrate()
     hg_dot[0][1]=hg_dot[1][0]=omega_dot[5]; 
 
     //CM diagonalize the unit-cell momentum
-    dsyevv3(hg_dot, eigv, omega_dot_eig);
+    //dsyevv3(hg_dot, eigv, omega_dot_eig);
+    Matrix3d Hgdot;
+    for (int i=0; i<3; i++) for (int j=0; j<3; j++) Hgdot(i,j)=hg_dot[i][j];
+    SelfAdjointEigenSolver<Matrix3d> eigensolver(Hgdot);
+    if (eigensolver.info() != Success) abort();
+    for (int i=0; i<3; i++) omega_dot_eig[i]=eigensolver.eigenvalues()(i);
+    for (int i=0; i<3; i++) for (int j=0; j<3; j++) eigv[i][j]=eigensolver.eigenvectors()(i,j);
 
     kecurrent = 0.0;
     pdof = 0;
@@ -3623,6 +3684,8 @@ void FixPIMD::monitor_observable()
 {
   //NPT
   if (pstat_flag && mpchain){
+    //etot
+    observe_etot();
     //temp observe
     observe_temp_scalar();
     //pressure
@@ -3631,9 +3694,9 @@ void FixPIMD::monitor_observable()
     observe_E_consv();
     if(universe->me==0){
       if (pimdfile){
-        fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f    %f\n", 
+        fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f    %f    %f\n", 
                           update->ntimestep, t_current_avg, vol_current, pressure_current, 
-                          E_consv, etot/boltz/atom->natoms, petot/boltz/atom->natoms, ketot/boltz/atom->natoms);
+                          E_consv, etot/boltz/atom->natoms, petot/boltz/atom->natoms, ketot/boltz/atom->natoms, Pc_longest);
 
         //fprintf(pimdfile, "%d    %f    %f\n", update->ntimestep,  ketot/boltz,  boltz);
         //fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    \n", update->ntimestep, t_current_avg, vol_current, pressure_current, pe_current_avg, E_consv);
