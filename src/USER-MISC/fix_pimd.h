@@ -236,6 +236,7 @@ class FixPIMD : public Fix {
 
   //observable
   double vol_current;
+  void compute_volume();
   void monitor_observable();
   void initialize_logfile();
   double etot; 

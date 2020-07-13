@@ -314,7 +314,7 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
       eigv[i] = new double[3];
 
   omega_dot_eig = new double[3];
-  p_current_tensor_avg = new double[3];
+  p_current_tensor_avg = new double[6];
 
   // Nose/Hoover temp and pressure init                                            
   
@@ -789,10 +789,9 @@ void FixPIMD::setup(int vflag)
   //t_current = temperature->compute_scalar();
   t_current = compute_temp_scalar();
   tdof = temperature->dof;
-  if(universe->me==0) printf("tdof: %f\n", tdof);
-
+  //if(universe->me==0) printf("tdof: %f\n", tdof);
   if (pstat_flag) compute_press_target();
-
+  compute_volume();
 //  comm_exec(atom->x);
 //  remove_spring_force();
     if (pstat_flag) {
@@ -952,6 +951,7 @@ void FixPIMD::initial_integrate(int /*vflag*/)
 //    remove_spring_force();
 
 //    if(universe->me==0){
+    compute_volume();
       if (pstat_flag) {
         if (pstyle == ISO) {
           t_current = compute_temp_scalar();
@@ -1096,6 +1096,7 @@ void FixPIMD::final_integrate()
 //    comm_exec(atom->x);
 //    remove_spring_force();
 //    if(universe->me==0){
+    compute_volume();
       if (pstat_flag) {
         if (pstyle == ISO){
           t_current = compute_temp_scalar();
@@ -2035,36 +2036,18 @@ void FixPIMD::couple()
     p_current[0] = p_current[2] = ave;
     p_current[1] = tensor[1];
   } else {
-//    double ave = 1.0/3.0 * (tensor[0] + tensor[1] + tensor[2]);
-//    p_current[0] = p_current[1] = p_current[2] = ave;
-//    p_current[0] = p_current_tensor_avg[0];
-//    p_current[1] = p_current_tensor_avg[1];
-//    p_current[2] = p_current_tensor_avg[2];
+    p_current[0] = p_current_tensor_avg[0];
+    p_current[1] = p_current_tensor_avg[1];
+    p_current[2] = p_current_tensor_avg[2];
   }
 
-  // switch order from xy-xz-yz to Voigt
-
   if (pstyle == TRICLINIC) {
-//    double ave = 1.0/3.0 * (tensor[0] + tensor[1] + tensor[2]);
-//    p_current[0] = ave;
-//    p_current[1] = ave;
-//    p_current[2] = ave;
-//    p_current[3] = 0.0;
-//    p_current[4] = 0.0;
-//    p_current[5] = 0.0;
-//    p_current[0] = tensor[0];
-//    p_current[1] = tensor[1];
-//    p_current[2] = tensor[2];
-    double ave = 1.0/3.0 * (p_current_tensor_avg[0] + p_current_tensor_avg[1] + p_current_tensor_avg[2]);
-    p_current[0] = ave;
-    p_current[1] = ave;
-    p_current[2] = ave;
-    p_current[3] = tensor[5];
-    p_current[4] = tensor[4];
-    p_current[5] = tensor[3];
+    p_current[3] = p_current_tensor_avg[3]; 
+    p_current[4] = p_current_tensor_avg[4]; 
+    p_current[5] = p_current_tensor_avg[5]; 
 
-  if(universe->me==0)
-    printf("pressure: %f %f %f / %f %f %f\n", p_current[0], p_current[1],p_current[2], p_current[3], p_current[4], p_current[5]);
+//  if(universe->me==0)
+//    printf("pressure: %f %f %f / %f %f %f\n", p_current[0], p_current[1],p_current[2], p_current[3], p_current[4], p_current[5]);
   }
 }
 
@@ -2078,6 +2061,68 @@ that should sum all beads' kinetic terms and normalized by N*np
 
 Eq(3.5) J. Chem. Phys. 110 3275 (1999)
 */
+void FixPIMD::compute_volume()
+{
+  int nlocal = atom->nlocal;
+
+  double h[6];
+  //CM eigen transformation
+  double **hh, **hh_eigv, *h_eig;
+
+  hh = new double*[3];
+  for(int i = 0; i < 3; ++i)
+      hh[i] = new double[3];
+
+  hh_eigv = new double*[3];
+  for(int i = 0; i < 3; ++i)
+      hh_eigv[i] = new double[3];
+
+  h_eig = new double[3];
+
+  if (pstyle == TRICLINIC) {
+    h[0]=domain->h[0];
+    h[1]=domain->h[1];
+    h[2]=domain->h[2];
+    h[3]=domain->h[3];
+    h[4]=domain->h[4];
+    h[5]=domain->h[5];
+
+    hh[0][0]=h[0]; 
+    hh[1][1]=h[1]; 
+    hh[2][2]=h[2]; 
+    hh[1][2]=hh[2][1]=h[3]; 
+    hh[0][2]=hh[2][0]=h[4]; 
+    hh[0][1]=hh[1][0]=h[5]; 
+
+    Matrix3d Hmat;
+    for (int i=0; i<3; i++) for (int j=0; j<3; j++) Hmat(i,j)=hh[i][j];
+    SelfAdjointEigenSolver<Matrix3d> eigensolver(Hmat);
+    if (eigensolver.info() != Success) abort();
+    for (int i=0; i<3; i++) h_eig[i]=eigensolver.eigenvalues()(i);
+    for (int i=0; i<3; i++) for (int j=0; j<3; j++) hh_eigv[i][j]=eigensolver.eigenvectors()(i,j);
+  }
+
+  if (pstyle == ISO) {
+    if (dimension == 3) vol_current = domain->xprd*domain->yprd*domain->zprd;
+    else vol_current = domain->xprd*domain->yprd;
+  }
+  else if (pstyle == TRICLINIC) {
+    vol_current = h_eig[0]*h_eig[1]*h_eig[2];
+  }
+  //delete
+  for(int i = 0; i < 3; ++i){
+    delete[] hh[i];
+  }
+  delete[] hh;
+
+  for(int i = 0; i < 3; ++i){
+    delete[] hh_eigv[i];
+  }
+  delete[] hh_eigv;
+
+  delete[] h_eig;
+}
+
 void FixPIMD::nh_omega_dot()
 {
   double f_omega,volume;
@@ -2134,9 +2179,9 @@ void FixPIMD::nh_omega_dot()
   else if (pstyle == TRICLINIC) {
     volume = h_eig[0]*h_eig[1]*h_eig[2];
     //CM print the nm mass
-    if(universe->me==0){
-      printf("h, vol(tri) = (%f, %f, %f), %.4f \n", h_eig[0], h_eig[1], h_eig[2], volume);
-    }
+    //if(universe->me==0){
+    //  printf("h, vol(tri) = (%f, %f, %f), %.4f \n", h_eig[0], h_eig[1], h_eig[2], volume);
+    //}
   }
 
   //broadcast volume to all 
@@ -2280,9 +2325,9 @@ void FixPIMD::nh_omega_dot_x()
   //for full-cell fluctuations
   //CM is this right? The matrix is one of the whole block by mpi parallelization. 
   else if (pstyle == TRICLINIC) {
-    if(universe->me==0){
-      printf("omega_dot: %e / %e / %e \n", omega_dot[0], omega_dot[1], omega_dot[2]);
-    }
+///    if(universe->me==0){
+///      printf("omega_dot: %e / %e / %e \n", omega_dot[0], omega_dot[1], omega_dot[2]);
+///    }
     hg_dot[0][0]=omega_dot[0]; 
     hg_dot[1][1]=omega_dot[1]; 
     hg_dot[2][2]=omega_dot[2]; 
@@ -2325,18 +2370,18 @@ void FixPIMD::nh_omega_dot_x()
 //     printf("Eigen eigenvalue: %e %e %e", eigen_eig[0], eigen_eig[1], eigen_eig[2]);
 //    }
 
-    if(universe->me==0){
-      printf("omega_dot_x\n");
-
-      printf("hg_dot: %e / %e / %e \n", hg_dot[0][0], hg_dot[0][1], hg_dot[0][2]);
-      printf("hg_dot: %e / %e / %e \n", hg_dot[1][0], hg_dot[1][1], hg_dot[1][2]);
-      printf("hg_dot: %e / %e / %e \n", hg_dot[2][0], hg_dot[2][1], hg_dot[2][2]);
-
-      printf("eig: %f / %f / %f \n", omega_dot_eig[0], omega_dot_eig[1], omega_dot_eig[2]);
-      printf("eigv: %e / %e / %e \n", eigv[0][0], eigv[0][1], eigv[0][2]);
-      printf("eigv: %e / %e / %e \n", eigv[1][0], eigv[1][1], eigv[1][2]);
-      printf("eigv: %e / %e / %e \n", eigv[2][0], eigv[2][1], eigv[2][2]);
-    }
+//    if(universe->me==0){
+//      printf("omega_dot_x\n");
+//
+//      printf("hg_dot: %e / %e / %e \n", hg_dot[0][0], hg_dot[0][1], hg_dot[0][2]);
+//      printf("hg_dot: %e / %e / %e \n", hg_dot[1][0], hg_dot[1][1], hg_dot[1][2]);
+//      printf("hg_dot: %e / %e / %e \n", hg_dot[2][0], hg_dot[2][1], hg_dot[2][2]);
+//
+//      printf("eig: %f / %f / %f \n", omega_dot_eig[0], omega_dot_eig[1], omega_dot_eig[2]);
+//      printf("eigv: %e / %e / %e \n", eigv[0][0], eigv[0][1], eigv[0][2]);
+//      printf("eigv: %e / %e / %e \n", eigv[1][0], eigv[1][1], eigv[1][2]);
+//      printf("eigv: %e / %e / %e \n", eigv[2][0], eigv[2][1], eigv[2][2]);
+//    }
 
 //    if(universe->me==0){
 //      printf("x: %f / %f / %f \n", x[0][0], x[0][1], x[0][2]);
@@ -3809,27 +3854,36 @@ void FixPIMD::compute_pressure_vector()
   compute_temp_vector();
   double *t_tensor_nm=t_current_vector;
   double *t_tensor_md=temperature->vector;
-  double p_current_tensor_p[3];
-  double virial[3];
-  double volume=domain->xprd*domain->yprd*domain->zprd;
+  double p_current_tensor_p[6];
+  double virial[6];
+  //CM need to add for the case TRICLINIC!
+  //double volume=domain->xprd*domain->yprd*domain->zprd;
 
   virial[0]=virial[1]=virial[2]=0.0;
+  virial[3]=virial[4]=virial[5]=0.0;
   for(int i=0; i<atom->nlocal; i++){
     for(int j=0; j<3; j++){
       virial[j]+=fc[i][j]*xc[i][j];
     }
   }
 
-  p_current_tensor_p[0]=p_current_tensor_p[1]=p_current_tensor_p[2]=0.0;
-  for(int i=0; i<3; ++i){
-    p_current_tensor_p[i]+=virial[i]/volume*force->nktv2p;
+  for(int i=0; i<atom->nlocal; i++){
+    virial[3]+=fc[i][0]*xc[i][1];
+    virial[4]+=fc[i][0]*xc[i][2];
+    virial[5]+=fc[i][1]*xc[i][2];
   }
-  MPI_Allreduce(p_current_tensor_p,p_current_tensor_avg,3,MPI_DOUBLE,MPI_SUM,world);
+
+  p_current_tensor_p[0]=p_current_tensor_p[1]=p_current_tensor_p[2]=0.0;
+  p_current_tensor_p[3]=p_current_tensor_p[4]=p_current_tensor_p[5]=0.0;
+  for(int i=0; i<6; ++i){
+    p_current_tensor_p[i]+=virial[i]/vol_current*force->nktv2p;
+  }
+  MPI_Allreduce(p_current_tensor_p,p_current_tensor_avg,6,MPI_DOUBLE,MPI_SUM,world);
 
   for(int i=0; i<3; ++i){
     //p_current_tensor_avg[i]+=atom->natoms*boltz*t_tensor_nm[i]/volume*force->nktv2p;
     //p_current_tensor_avg[i]+=atom->natoms*boltz*t_current/3.0/volume*force->nktv2p;
-    p_current_tensor_avg[i]+=atom->natoms*boltz*nhc_temp/volume*force->nktv2p;
+    p_current_tensor_avg[i]+=atom->natoms*boltz*nhc_temp/vol_current*force->nktv2p;
   }
 
 // de/dv
@@ -3838,21 +3892,33 @@ void FixPIMD::compute_pressure_vector()
   double *p_current_tensor_ev=pressure->vector;
 
   virial[0]=virial[1]=virial[2]=0.0;
+  virial[3]=virial[4]=virial[5]=0.0;
   for(int i=0; i<atom->nlocal; i++){
     for(int j=0; j<3; j++){
       virial[j]+=fpre[i][j]*atom->x[i][j];
     }
   }
 
+  for(int i=0; i<atom->nlocal; i++){
+    virial[3]+=fpre[i][0]*atom->x[i][1];
+    virial[4]+=fpre[i][0]*atom->x[i][2];
+    virial[5]+=fpre[i][1]*atom->x[i][2];
+  }
+
   for(int i=0; i<3; ++i){
-    p_current_tensor_ev[i]-=virial[i]/volume*force->nktv2p;
-    p_current_tensor_ev[i]-=atom->natoms*boltz*t_tensor_md[i]/volume*force->nktv2p;
+    p_current_tensor_ev[i]-=virial[i]/vol_current*force->nktv2p;
+    p_current_tensor_ev[i]-=atom->natoms*boltz*t_tensor_md[i]/vol_current*force->nktv2p;
     //p_current_tensor_ev[i]-=atom->natoms*boltz*nhc_temp/volume*force->nktv2p;
   }
 
-  MPI_Allreduce(MPI_IN_PLACE,p_current_tensor_ev,3,MPI_DOUBLE,MPI_SUM,beads_comm);
+  //cwmyung-point Wed Jun 24 11:05:44 CEST 2020
+  for(int i=3; i<6; ++i){
+    p_current_tensor_ev[i]-=virial[i]/vol_current*force->nktv2p;
+  }
 
-  for(int i=0; i<3; ++i){
+  MPI_Allreduce(MPI_IN_PLACE,p_current_tensor_ev,6,MPI_DOUBLE,MPI_SUM,beads_comm);
+
+  for(int i=0; i<6; ++i){
     p_current_tensor_avg[i]+=p_current_tensor_ev[i]/(double)np;
     //p_current_tensor_avg[i]+=p_current_tensor_ev[i];
   }
