@@ -136,6 +136,7 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
   eta_mass_flag = 1;
 
   p_current_tensor_avg=NULL;
+  p_current_spring=NULL;
   xc  = NULL;
   fc  = NULL;
   fpre  = NULL;
@@ -315,6 +316,7 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
 
   omega_dot_eig = new double[3];
   p_current_tensor_avg = new double[6];
+  p_current_spring = new double[6];
 
   // Nose/Hoover temp and pressure init                                            
   
@@ -792,22 +794,26 @@ void FixPIMD::setup(int vflag)
   //if(universe->me==0) printf("tdof: %f\n", tdof);
   if (pstat_flag) compute_press_target();
   compute_volume();
-//  comm_exec(atom->x);
-//  remove_spring_force();
     if (pstat_flag) {
+      //add spring contrib. 
+      comm_exec(atom->x);
+      spring_pressure();
+
       if (pstyle == ISO){ 
         //pressure->compute_scalar();
         compute_pressure_scalar();
         //if(universe->me==0) printf("pressure scalar computed. \n");
         if (pcouple == XYZ){
           //pressure->compute_vector();
-          compute_pressure_vector();
+          //compute_pressure_vector();
+          compute_pressure_vector_primitive();
           //if(universe->me==0) printf("pressure vector computed. \n");
           }
-        }
+      }
       if (pstyle == TRICLINIC){ 
         pressure->compute_vector();
-        compute_pressure_vector();
+        //compute_pressure_vector();
+        compute_pressure_vector_primitive();
       }
       couple();
       pressure->addstep(update->ntimestep+1);
@@ -825,8 +831,6 @@ void FixPIMD::setup(int vflag)
 //    }
 //  }
 
-//  comm_exec(atom->x);
-//  spring_force();
 
 // CM
 /* ---------------------------------------------------------------------- */
@@ -953,6 +957,10 @@ void FixPIMD::initial_integrate(int /*vflag*/)
 //    if(universe->me==0){
     compute_volume();
       if (pstat_flag) {
+        //add spring contrib. 
+        comm_exec(atom->x);
+        spring_pressure();
+
         if (pstyle == ISO) {
           t_current = compute_temp_scalar();
           temperature->compute_scalar();
@@ -960,14 +968,16 @@ void FixPIMD::initial_integrate(int /*vflag*/)
           compute_pressure_scalar();
           if (pcouple == XYZ){
             //pressure->compute_vector();
-            compute_pressure_vector();
+            //compute_pressure_vector();
+            compute_pressure_vector_primitive();
           }
         } else {
           t_current = compute_temp_scalar();
           compute_temp_vector();
           temperature->compute_vector();
           //pressure->compute_vector();
-          compute_pressure_vector();
+          //compute_pressure_vector();
+          compute_pressure_vector_primitive();
         }
         couple();
         pressure->addstep(update->ntimestep+1);
@@ -1088,46 +1098,34 @@ void FixPIMD::final_integrate()
     // t_current is up-to-date, but compute_temperature is not
     // compute appropriately coupled elements of mvv_current
 
-//  For test purpose,
-//    remove_spring_force();
-//    multiply_post_force();
-////////
-
-//    comm_exec(atom->x);
-//    remove_spring_force();
-//    if(universe->me==0){
     compute_volume();
-      if (pstat_flag) {
-        if (pstyle == ISO){
-          t_current = compute_temp_scalar();
-          temperature->compute_scalar();
-          //pressure->compute_scalar();
-          compute_pressure_scalar();
-          if (pcouple == XYZ){
-            //pressure->compute_vector();
-            compute_pressure_vector();
-          }
-        }
-        else {
-          t_current = compute_temp_scalar();
-          compute_temp_vector();
-          temperature->compute_vector();
+    if (pstat_flag) {
+      //add spring contrib. 
+      comm_exec(atom->x);
+      spring_pressure();
+
+      if (pstyle == ISO){
+        t_current = compute_temp_scalar();
+        temperature->compute_scalar();
+        //pressure->compute_scalar();
+        compute_pressure_scalar();
+        if (pcouple == XYZ){
           //pressure->compute_vector();
-          compute_pressure_vector();
+          //compute_pressure_vector();
+          compute_pressure_vector_primitive();
         }
-        couple();
-        pressure->addstep(update->ntimestep+1);
       }
-//    }
-
-
-//    comm_exec(atom->x);
-//    spring_force();
-
-//  For test purpose,
-//    spring_force();
-//    divide_post_force();
-////////
+      else {
+        t_current = compute_temp_scalar();
+        compute_temp_vector();
+        temperature->compute_vector();
+        //pressure->compute_vector();
+        //compute_pressure_vector();
+        compute_pressure_vector_primitive();
+      }
+      couple();
+      pressure->addstep(update->ntimestep+1);
+    }
 
     //CM
     //this should only be done in proc0 and then broadcast
@@ -1529,6 +1527,44 @@ void FixPIMD::remove_spring_force()
   }
 }
 
+void FixPIMD::spring_pressure()
+{
+  for (int i=0; i<6; i++) p_current_spring[i]=0.0;
+
+  if(method_statistics==BOLTZMANN){
+    int nlocal = atom->nlocal;
+    double spring_E=0.0;
+    spring_energy = 0.0;
+  
+    double **x = atom->x;
+    double **f = atom->f;
+    double* _mass = atom->mass;
+    int* type = atom->type;
+  
+    double* xnext = buf_beads[x_next];
+  
+    for(int i=0; i<nlocal; i++)
+    {
+      double delx = xnext[0] - x[i][0];
+      double dely = xnext[1] - x[i][1];
+      double delz = xnext[2] - x[i][2];
+      xnext += 3;
+      domain->minimum_image(delx, dely, delz);
+  
+      double ff = fbond * _mass[type[i]];
+  
+      p_current_spring[0]+=ff*delx*delx;
+      p_current_spring[1]+=ff*dely*dely;
+      p_current_spring[2]+=ff*delz*delz;
+
+      p_current_spring[3]+=ff*delx*dely;
+      p_current_spring[4]+=ff*delx*delz;
+      p_current_spring[5]+=ff*dely*delz;
+    }
+    MPI_Allreduce(MPI_IN_PLACE,p_current_spring,6,MPI_DOUBLE,MPI_SUM,beads_comm);
+  }
+}
+
 void FixPIMD::spring_force()
 {
   if(method_statistics==BOLTZMANN){
@@ -1568,7 +1604,7 @@ void FixPIMD::spring_force()
       f[i][1] -= (dy) * ff;
       f[i][2] -= (dz) * ff;
   
-      spring_E += fbond * (dx*dx+dy*dy+dz*dz);
+      //spring_E += fbond * (dx*dx+dy*dy+dz*dz);
       //spring_energy += (dx*dx+dy*dy+dz*dz);
     }
     MPI_Allreduce(&spring_E,&spring_energy,1,MPI_DOUBLE,MPI_SUM,world);
@@ -3739,9 +3775,10 @@ void FixPIMD::monitor_observable()
     observe_E_consv();
     if(universe->me==0){
       if (pimdfile){
-        fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f    %f    %f\n", 
-                          update->ntimestep, t_current_avg, vol_current, pressure_current, 
-                          E_consv, etot/boltz/atom->natoms, petot/boltz/atom->natoms, ketot/boltz/atom->natoms, Pc_longest);
+        fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f    %f    %f    %f    %f    %f    %f    %f\n", 
+                          update->ntimestep, t_current_avg, vol_current, p_current[0], p_current[1], p_current[2], 
+                          p_current[3], p_current[4], p_current[5], E_consv, etot/boltz/atom->natoms, petot/boltz/atom->natoms, 
+                          ketot/boltz/atom->natoms, Pc_longest);
 
         //fprintf(pimdfile, "%d    %f    %f\n", update->ntimestep,  ketot/boltz,  boltz);
         //fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    \n", update->ntimestep, t_current_avg, vol_current, pressure_current, pe_current_avg, E_consv);
@@ -3842,6 +3879,86 @@ void FixPIMD::compute_pressure_scalar()
   }
   else{
     pressure->compute_scalar();}
+}
+
+//Pressure primitive estimator
+void FixPIMD::compute_pressure_vector_primitive()
+{
+  compute_temp_vector();
+  double *t_tensor_nm=t_current_vector;
+  double *t_tensor_md=temperature->vector;
+  double p_current_tensor_p[6];
+  double virial[6];
+
+  //Virial
+  virial[0]=virial[1]=virial[2]=0.0;
+  virial[3]=virial[4]=virial[5]=0.0;
+  for(int i=0; i<atom->nlocal; i++){
+    for(int j=0; j<3; j++){
+      virial[j]+=fpre[i][j]*atom->x[i][j]/np;
+    }
+  }
+
+  for(int i=0; i<atom->nlocal; i++){
+    virial[3]+=fpre[i][0]*atom->x[i][1]/np;
+    virial[4]+=fpre[i][0]*atom->x[i][2]/np;
+    virial[5]+=fpre[i][1]*atom->x[i][2]/np;
+  }
+
+  MPI_Allreduce(MPI_IN_PLACE,virial,6,MPI_DOUBLE,MPI_SUM,beads_comm);
+
+  p_current_tensor_p[0]=p_current_tensor_p[1]=p_current_tensor_p[2]=0.0;
+  p_current_tensor_p[3]=p_current_tensor_p[4]=p_current_tensor_p[5]=0.0;
+  for(int i=0; i<6; ++i){
+    p_current_tensor_p[i]+=virial[i]/vol_current*force->nktv2p;
+  }
+  MPI_Allreduce(p_current_tensor_p,p_current_tensor_avg,6,MPI_DOUBLE,MPI_SUM,world);
+
+  //spring term
+  //if(universe->me==0) printf("spring_pressure: %f \n", p_current_spring[0]);
+  for(int i=0;i<6;++i){
+    p_current_tensor_avg[i]+=p_current_spring[i]/vol_current*force->nktv2p;
+  }
+
+  //NMkT/V term
+  for(int i=0; i<3; ++i){
+    p_current_tensor_avg[i]+=np*atom->natoms*boltz*nhc_temp/vol_current*force->nktv2p;
+  }
+
+  // dU/dV
+  pressure->compute_vector();
+  temperature->compute_scalar();
+  double *p_current_tensor_ev=pressure->vector;
+
+  virial[0]=virial[1]=virial[2]=0.0;
+  virial[3]=virial[4]=virial[5]=0.0;
+  for(int i=0; i<atom->nlocal; i++){
+    for(int j=0; j<3; j++){
+      virial[j]+=fpre[i][j]*atom->x[i][j];
+    }
+  }
+
+  for(int i=0; i<atom->nlocal; i++){
+    virial[3]+=fpre[i][0]*atom->x[i][1];
+    virial[4]+=fpre[i][0]*atom->x[i][2];
+    virial[5]+=fpre[i][1]*atom->x[i][2];
+  }
+
+  for(int i=0; i<3; ++i){
+    p_current_tensor_ev[i]-=virial[i]/vol_current*force->nktv2p;
+    p_current_tensor_ev[i]-=atom->natoms*boltz*nhc_temp/vol_current*force->nktv2p;
+  }
+
+  for(int i=3; i<6; ++i){
+    p_current_tensor_ev[i]-=virial[i]/vol_current*force->nktv2p;
+  }
+
+  MPI_Allreduce(MPI_IN_PLACE,p_current_tensor_ev,6,MPI_DOUBLE,MPI_SUM,beads_comm);
+
+  for(int i=0; i<6; ++i){
+    p_current_tensor_avg[i]+=p_current_tensor_ev[i]/(double)np;
+  }
+
 }
 
 //wrapper function for pimd pressure virial calculation

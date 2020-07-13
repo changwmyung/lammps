@@ -215,8 +215,11 @@ class FixPIMD : public Fix {
   double pressure_scalar;
   double p_current_avg;
   void compute_pressure_vector();
+  void compute_pressure_vector_primitive();
+  void spring_pressure();
 //  double *p_current_tensor_p;
   double *p_current_tensor_avg;
+  double *p_current_spring;
 
   //temp measure
   //scalar
