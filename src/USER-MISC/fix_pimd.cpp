@@ -761,7 +761,8 @@ void FixPIMD::init()
   if(method_statistics==BOSON){
     E_kn=std::vector<double>((atom->natoms * (atom->natoms + 1) / 2),0.0);
     V=std::vector<double>((atom->natoms + 1),0.0);
-    dV=std::vector<std::vector<double>>(atom->natoms*universe->nworlds, std::vector<double>(3, 0.0));
+    //dV=std::vector<std::vector<double>>(atom->natoms*universe->nworlds, std::vector<double>(3, 0.0));
+    dV=std::vector<std::vector<double>>(atom->natoms, std::vector<double>(3, 0.0));
   }
 }
 
@@ -1529,14 +1530,15 @@ void FixPIMD::remove_spring_force()
 
 void FixPIMD::spring_pressure()
 {
+  int nlocal = atom->nlocal;
+  double **x = atom->x;
+
   for (int i=0; i<6; i++) p_current_spring[i]=0.0;
 
   if(method_statistics==BOLTZMANN){
-    int nlocal = atom->nlocal;
     double spring_E=0.0;
     spring_energy = 0.0;
   
-    double **x = atom->x;
     double **f = atom->f;
     double* _mass = atom->mass;
     int* type = atom->type;
@@ -1560,6 +1562,19 @@ void FixPIMD::spring_pressure()
       p_current_spring[3]+=ff*delx*dely;
       p_current_spring[4]+=ff*delx*delz;
       p_current_spring[5]+=ff*dely*delz;
+    }
+    MPI_Allreduce(MPI_IN_PLACE,p_current_spring,6,MPI_DOUBLE,MPI_SUM,beads_comm);
+  }
+  else if(method_statistics==BOSON){
+    for(int i=0; i<nlocal; i++)
+    {
+      p_current_spring[0]+=dV.at(i).at(0)*x[i][0];
+      p_current_spring[1]+=dV.at(i).at(1)*x[i][1];
+      p_current_spring[2]+=dV.at(i).at(2)*x[i][2];
+
+      p_current_spring[3]+=dV.at(i).at(0)*x[i][1];
+      p_current_spring[4]+=dV.at(i).at(0)*x[i][2];
+      p_current_spring[5]+=dV.at(i).at(1)*x[i][2];
     }
     MPI_Allreduce(MPI_IN_PLACE,p_current_spring,6,MPI_DOUBLE,MPI_SUM,beads_comm);
   }
@@ -3775,7 +3790,7 @@ void FixPIMD::monitor_observable()
     observe_E_consv();
     if(universe->me==0){
       if (pimdfile){
-        fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f    %f    %f    %f    %f    %f    %f    %f\n", 
+        fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f    %f    %f    %f    %f    %f    %f    %e\n", 
                           update->ntimestep, t_current_avg, vol_current, p_current[0], p_current[1], p_current[2], 
                           p_current[3], p_current[4], p_current[5], E_consv, etot/boltz/atom->natoms, petot/boltz/atom->natoms, 
                           ketot/boltz/atom->natoms, Pc_longest);
@@ -3796,7 +3811,7 @@ void FixPIMD::monitor_observable()
       if (pimdfile){
         //fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f\n", update->ntimestep, t_current_avg, vol_current, pressure_current, E_consv, etot/boltz/atom->natoms, vir_current_avg/boltz/atom->natoms);
         //fprintf(pimdfile, "%d    %f    %f  \n", update->ntimestep, t_current_avg, vol_current);
-        fprintf(pimdfile, "%d    %f    %f    %f    %f    %f\n", 
+        fprintf(pimdfile, "%d    %f    %f    %f    %f    %e\n", 
                           update->ntimestep, t_current_avg, 
                           etot/boltz/atom->natoms, petot/boltz/atom->natoms, ketot/boltz/atom->natoms, Pc_longest);
 //        fprintf(pimdfile, "%f    %f    %f \n", eta_E_sum, etap_E_sum, omega_E);
@@ -4951,6 +4966,61 @@ double FixPIMD::Evaluate_Ekn_new(const int n, const int k)
 
   return energy_local;
 }
+
+//void FixPIMD::Evaluate_Ekn_pressure(const int n, const int k)
+//{
+//  //bead is the bead number of current replica. bead = 0,...,np-1.
+//  int bead = universe->iworld;
+//
+//  double **x = atom->x;
+//  double* _mass = atom->mass;
+//  int* type = atom->type;
+//  int nlocal = atom->nlocal;
+//
+//  for (int i=0;i<6;i++) Ekn_p_spring[i]=0.0;
+//
+//  //buf_beads[j] is a 1-D array of length 3*nlocal x0^j,y0^j,z0^j,...,x_(nlocal-1)^j,y_(nlocal-1)^j,z_(nlocal-1)^j.
+//  double* xnext = buf_beads[x_next];
+//
+//  //omega^2, could use fbond instead?
+//  double omega_sq = omega_np*omega_np;
+//
+//  //E_n^(k)(R_n-k+1,...,R_n) is a function of k atoms
+//  xnext += 3*(n-k);
+//
+//  //np is total number of beads
+//  if(bead == np-1 && k > 1) xnext += 3;
+//
+//  for (int i = n-k; i < n ; ++i) {
+//
+//    double delx =x[i][0] - xnext[0]; 
+//    double dely =x[i][1] - xnext[1]; 
+//    double delz =x[i][2] - xnext[2]; 
+//
+//    domain->minimum_image(delx, dely, delz);
+//
+//    if (bead == np - 1 && i == n - 2) {
+//      xnext = buf_beads[x_next];
+//      xnext += 3*(n - k);
+//    } else xnext += 3;
+//
+//    Ekn_p_spring[0] -= _mass[type[i]]*omega_sq*(delx*delx);
+//    Ekn_p_spring[1] -= _mass[type[i]]*omega_sq*(dely*dely);
+//    Ekn_p_spring[2] -= _mass[type[i]]*omega_sq*(delz*delz);
+//
+//    Ekn_p_spring[3] -= _mass[type[i]]*omega_sq*(delx*dely);
+//    Ekn_p_spring[4] -= _mass[type[i]]*omega_sq*(delx*delz);
+//    Ekn_p_spring[5] -= _mass[type[i]]*omega_sq*(dely*delz);
+//  }
+//
+//  MPI_Allreduce(MPI_IN_PLACE,Ekn_p_spring,6,MPI_DOUBLE,MPI_SUM,universe->uworld);
+//
+//  if(std::isnan(spring_energy) || std::isnan(energy_all)){
+//    std::cout<< universe->iworld << " " << spring_energy <<" " << energy_all <<std::endl;
+//    exit(0);}
+//
+//  return Ekn_p_spring;
+//}
 
 //E_n^(k) is a function of k atoms (R_n-k+1,...,R_n) for a given n and k.
 double FixPIMD::Evaluate_Ekn(const int n, const int k)

@@ -311,6 +311,9 @@ class FixPIMD : public Fix {
   double sEl;
   double ke_boson_vir;
   int* nlocal_info;
+  //pimdb pressure tensor contrib.
+  double Ekn_p_spring[6];
+
   std::vector<double> E_kn;
   std::vector<double> V;
   std::vector<std::vector<double>> dV;
