@@ -316,6 +316,7 @@ class FixPIMD : public Fix {
 
   std::vector<double> E_kn;
   std::vector<double> V;
+  std::vector<double> P_l;
   std::vector<std::vector<double>> dV;
   //CM
   //std::vector<double> ke_boson;
@@ -326,6 +327,8 @@ class FixPIMD : public Fix {
   std::vector<double> Evaluate_dEkn_on_atom(const int n, const int k, const int atomnum);
   std::vector<std::vector<double>> Evaluate_dVBn(const std::vector <double>& V, const std::vector <double>& save_E_kn, const int n);
   void observe_Pc_longest();
+  void ring_stat_v1();
+  void ring_stat_v2();
 
   //parallelization
   //std::vector<double> Evaluate_VBn_new(std::vector <double>& V, const int n);

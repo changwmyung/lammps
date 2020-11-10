@@ -304,17 +304,6 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
 //  for(int i = 0; i < 3; i++)
 //      xc[i] = new double[3];
 
-  //CM declare 3x3 hg unit-cell
-  hg_dot = new double*[3];
-  for(int i = 0; i < 3; ++i)
-      hg_dot[i] = new double[3];
-
-  //CM declare eig vector 
-  eigv = new double*[3];
-  for(int i = 0; i < 3; ++i)
-      eigv[i] = new double[3];
-
-  omega_dot_eig = new double[3];
   p_current_tensor_avg = new double[6];
   p_current_spring = new double[6];
 
@@ -532,6 +521,7 @@ void FixPIMD::init()
 {
   pimdfile = fopen("pimd.log","w");
   initialize_logfile();
+  //ringfile = fopen("rings.log","w");
 
   if (atom->map_style == 0)
     error->all(FLERR,"Fix pimd requires an atom map, see atom_modify");
@@ -577,6 +567,7 @@ void FixPIMD::init()
     fprintf(pimdfile, " * LAMMPS internal units = %s \n", update->unit_style);
     fprintf(pimdfile, " * Boltzmann constant = %20.7lE \n", boltz);
     fprintf(pimdfile, " * -P/(beta^2 * hbar^2) = %20.7lE \n", fbond);
+    fprintf(pimdfile, " * hbar = %20.7lE \n", hbar);
     fprintf(pimdfile, " * Dimension of the system = %d\n", dimension);
   }
   if(universe->me==0) fprintf(pimdfile, "*****************************************************************************************************\n");
@@ -761,6 +752,7 @@ void FixPIMD::init()
   if(method_statistics==BOSON){
     E_kn=std::vector<double>((atom->natoms * (atom->natoms + 1) / 2),0.0);
     V=std::vector<double>((atom->natoms + 1),0.0);
+    P_l=std::vector<double>((atom->natoms + 1),0.0);
     //dV=std::vector<std::vector<double>>(atom->natoms*universe->nworlds, std::vector<double>(3, 0.0));
     dV=std::vector<std::vector<double>>(atom->natoms, std::vector<double>(3, 0.0));
   }
@@ -919,14 +911,9 @@ void FixPIMD::setup(int vflag)
 void FixPIMD::initial_integrate(int /*vflag*/)
 {
 
-  //if(universe->me==0) printf("init integ. finished! \n");
-
   //CM update the centroid xc & fc
   //uncomment later !
   update_x_centroid();
-
-  //CM debug
-  //observe_temp_scalar();
 
   if(update->ntimestep%output->thermo_every==0){
     monitor_observable();
@@ -934,94 +921,67 @@ void FixPIMD::initial_integrate(int /*vflag*/)
 
   if (pstat_flag && mpchain){
 
-  //if(universe->me==0)
-  //  printf("NPT running...! %d %d \n", pstat_flag, mpchain);
-
     nhc_press_integrate();
     compute_temp_target();
     nhc_temp_integrate();
+
 
 //  // need to recompute pressure to account for change in KE
 //  // t_current is up-to-date, but compute_temperature is not
 //  // compute appropriately coupled elements of mvv_current
 
-//  CM measure the pressure & temperature again!
-
-//  For test purpose,
-//    remove_spring_force();
-//    multiply_post_force();
-////////
-
-//    comm_exec(atom->x);
-//    remove_spring_force();
-
-//    if(universe->me==0){
     compute_volume();
-      if (pstat_flag) {
-        //add spring contrib. 
-        comm_exec(atom->x);
-        spring_pressure();
+    if (pstat_flag) {
+      //add spring contrib. 
+      comm_exec(atom->x);
+      spring_pressure();
 
-        if (pstyle == ISO) {
-          t_current = compute_temp_scalar();
-          temperature->compute_scalar();
-          //pressure->compute_scalar();
-          compute_pressure_scalar();
-          if (pcouple == XYZ){
-            //pressure->compute_vector();
-            //compute_pressure_vector();
-            compute_pressure_vector_primitive();
-          }
-        } else {
-          t_current = compute_temp_scalar();
-          compute_temp_vector();
-          temperature->compute_vector();
+      if (pstyle == ISO) {
+        t_current = compute_temp_scalar();
+        temperature->compute_scalar();
+        //pressure->compute_scalar();
+        compute_pressure_scalar();
+        if (pcouple == XYZ){
           //pressure->compute_vector();
           //compute_pressure_vector();
           compute_pressure_vector_primitive();
         }
-        couple();
-        pressure->addstep(update->ntimestep+1);
+      } else {
+        t_current = compute_temp_scalar();
+        compute_temp_vector();
+        temperature->compute_vector();
+        //pressure->compute_vector();
+        //compute_pressure_vector();
+        compute_pressure_vector_primitive();
       }
-//    }
-
-//    comm_exec(atom->x);
-//    spring_force();
-
-//  For test purpose,
-//    spring_force();
-//    divide_post_force();
-////////
+      couple();
+      pressure->addstep(update->ntimestep+1);
+    }
   
     if (pstat_flag) {
       compute_press_target();
       //CM
       //this should only be done in proc0 and then broadcast
-      if(universe->me==0) nh_omega_dot();
-      //nh_omega_dot();
+      //if(universe->me==0) nh_omega_dot();
+      nh_omega_dot();
 
       //broadcast
       //CM do we need this ?could be a redundant communication. 
       //CM change it to Allreduce 
+      //CM do I need this?
       MPI_Barrier(universe->uworld);
       MPI_Bcast(omega_dot, 6, MPI_DOUBLE, 0, universe->uworld);
-      if (pstyle == TRICLINIC) {
-        MPI_Bcast(omega_dot_eig, 3, MPI_DOUBLE, 0, universe->uworld);
-        for(int i=0; i<3; i++){
-          MPI_Bcast(eigv[i], 3, MPI_DOUBLE, 0, universe->uworld);}
-      }
       MPI_Barrier(universe->uworld);
 
       //centroid approx.
+      //Mind that centroid approx. is only valid for Boltzmannon
       if(method_centroid==REDUCE){
-        //if(universe->me==0) nh_omega_dot_x();}
         if(universe->iworld==0) nh_omega_dot_x();}
       else if(method_centroid==FULL){
         nh_omega_dot_x();}
 
       //CM
       //reduced centroid eom.
-      //if(universe->me==0) nh_v_press();
       if(method_centroid==REDUCE){
         //if(universe->me==0) nh_v_press();
         if(universe->iworld==0) nh_v_press();
@@ -1031,7 +991,6 @@ void FixPIMD::initial_integrate(int /*vflag*/)
       }
       
     }
-
   
     nve_v();
   
@@ -1056,7 +1015,6 @@ void FixPIMD::initial_integrate(int /*vflag*/)
   nhc_update_x();
   }
 
-  //if(universe->me==0) printf("init integ. finished! \n");
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1066,10 +1024,6 @@ void FixPIMD::final_integrate()
   if (pstat_flag && mpchain){
     nve_v();
 
-    //CM
-    //scaling is only for centroid
-    //if(universe->me==0) nh_v_press();
-    //nh_v_press();
 
 //    // re-compute temp before nh_v_press()
 //    // only needed for temperature computes with BIAS on reneighboring steps:
@@ -1130,16 +1084,11 @@ void FixPIMD::final_integrate()
 
     //CM
     //this should only be done in proc0 and then broadcast
-    if(universe->me==0) nh_omega_dot();
-    //nh_omega_dot();
+    //if(universe->me==0) nh_omega_dot();
+    nh_omega_dot();
     //broadcast
     MPI_Barrier(universe->uworld);
     MPI_Bcast(omega_dot, 6, MPI_DOUBLE, 0, universe->uworld);
-    if (pstyle == TRICLINIC) {
-      MPI_Bcast(omega_dot_eig, 3, MPI_DOUBLE, 0, universe->uworld);
-      for(int i=0; i<3; i++){
-        MPI_Bcast(eigv[i], 3, MPI_DOUBLE, 0, universe->uworld);}
-    }
     MPI_Barrier(universe->uworld);
 
     if(method_centroid==REDUCE){
@@ -1451,15 +1400,15 @@ void FixPIMD::nmpimd_init()
   }
 
   //CM 
-  //normal mode velocity rescaling 
-  if(iworld)
-  {
-    for(int i=0;i<atom->nlocal;i++){
-      for(int j=0;j<3;j++){
-      atom->v[i][j]/=sqrt(lam[iworld]);
-      }
-    }
-  }
+//  //normal mode velocity rescaling 
+//  if(iworld)
+//  {
+//    for(int i=0;i<atom->nlocal;i++){
+//      for(int j=0;j<3;j++){
+//      atom->v[i][j]/=sqrt(lam[iworld]);
+//      }
+//    }
+//  }
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1559,9 +1508,9 @@ void FixPIMD::spring_pressure()
       p_current_spring[1]+=ff*dely*dely;
       p_current_spring[2]+=ff*delz*delz;
 
-      p_current_spring[3]+=ff*delx*dely;
+      p_current_spring[3]+=ff*dely*delz;
       p_current_spring[4]+=ff*delx*delz;
-      p_current_spring[5]+=ff*dely*delz;
+      p_current_spring[5]+=ff*delx*dely;
     }
     MPI_Allreduce(MPI_IN_PLACE,p_current_spring,6,MPI_DOUBLE,MPI_SUM,beads_comm);
   }
@@ -1572,9 +1521,9 @@ void FixPIMD::spring_pressure()
       p_current_spring[1]+=dV.at(i).at(1)*x[i][1];
       p_current_spring[2]+=dV.at(i).at(2)*x[i][2];
 
-      p_current_spring[3]+=dV.at(i).at(0)*x[i][1];
+      p_current_spring[3]+=dV.at(i).at(1)*x[i][2];
       p_current_spring[4]+=dV.at(i).at(0)*x[i][2];
-      p_current_spring[5]+=dV.at(i).at(1)*x[i][2];
+      p_current_spring[5]+=dV.at(i).at(0)*x[i][1];
     }
     MPI_Allreduce(MPI_IN_PLACE,p_current_spring,6,MPI_DOUBLE,MPI_SUM,beads_comm);
   }
@@ -1635,6 +1584,10 @@ void FixPIMD::spring_force()
     ke_boson_vir=Evaluate_ke_boson(V, E_kn);
     //Prob. of the longest polymer  
     observe_Pc_longest();
+    if(update->ntimestep%output->thermo_every==0){
+      ring_stat_v1();
+      ring_stat_v2();
+    }
 
 /*
     //parallel ver.
@@ -2096,9 +2049,6 @@ void FixPIMD::couple()
     p_current[3] = p_current_tensor_avg[3]; 
     p_current[4] = p_current_tensor_avg[4]; 
     p_current[5] = p_current_tensor_avg[5]; 
-
-//  if(universe->me==0)
-//    printf("pressure: %f %f %f / %f %f %f\n", p_current[0], p_current[1],p_current[2], p_current[3], p_current[4], p_current[5]);
   }
 }
 
@@ -2116,144 +2066,21 @@ void FixPIMD::compute_volume()
 {
   int nlocal = atom->nlocal;
 
-  double h[6];
-  //CM eigen transformation
-  double **hh, **hh_eigv, *h_eig;
-
-  hh = new double*[3];
-  for(int i = 0; i < 3; ++i)
-      hh[i] = new double[3];
-
-  hh_eigv = new double*[3];
-  for(int i = 0; i < 3; ++i)
-      hh_eigv[i] = new double[3];
-
-  h_eig = new double[3];
-
-  if (pstyle == TRICLINIC) {
-    h[0]=domain->h[0];
-    h[1]=domain->h[1];
-    h[2]=domain->h[2];
-    h[3]=domain->h[3];
-    h[4]=domain->h[4];
-    h[5]=domain->h[5];
-
-    hh[0][0]=h[0]; 
-    hh[1][1]=h[1]; 
-    hh[2][2]=h[2]; 
-    hh[1][2]=hh[2][1]=h[3]; 
-    hh[0][2]=hh[2][0]=h[4]; 
-    hh[0][1]=hh[1][0]=h[5]; 
-
-    Matrix3d Hmat;
-    for (int i=0; i<3; i++) for (int j=0; j<3; j++) Hmat(i,j)=hh[i][j];
-    SelfAdjointEigenSolver<Matrix3d> eigensolver(Hmat);
-    if (eigensolver.info() != Success) abort();
-    for (int i=0; i<3; i++) h_eig[i]=eigensolver.eigenvalues()(i);
-    for (int i=0; i<3; i++) for (int j=0; j<3; j++) hh_eigv[i][j]=eigensolver.eigenvectors()(i,j);
-  }
-
-  if (pstyle == ISO) {
-    if (dimension == 3) vol_current = domain->xprd*domain->yprd*domain->zprd;
-    else vol_current = domain->xprd*domain->yprd;
-  }
-  else if (pstyle == TRICLINIC) {
-    vol_current = h_eig[0]*h_eig[1]*h_eig[2];
-  }
-  //delete
-  for(int i = 0; i < 3; ++i){
-    delete[] hh[i];
-  }
-  delete[] hh;
-
-  for(int i = 0; i < 3; ++i){
-    delete[] hh_eigv[i];
-  }
-  delete[] hh_eigv;
-
-  delete[] h_eig;
+  if (dimension == 3) vol_current = domain->xprd*domain->yprd*domain->zprd;
+  else vol_current = domain->xprd*domain->yprd;
 }
 
 void FixPIMD::nh_omega_dot()
 {
   double f_omega,volume;
-//  double **x = atom->x;
   int nlocal = atom->nlocal;
-
-  double h[6];
-  //CM eigen transformation
-  double **hh, **hh_eigv, *h_eig;
-
-  hh = new double*[3];
-  for(int i = 0; i < 3; ++i)
-      hh[i] = new double[3];
-
-  hh_eigv = new double*[3];
-  for(int i = 0; i < 3; ++i)
-      hh_eigv[i] = new double[3];
-
-  h_eig = new double[3];
-
-  if (pstyle == TRICLINIC) {
-    h[0]=domain->h[0];
-    h[1]=domain->h[1];
-    h[2]=domain->h[2];
-    h[3]=domain->h[3];
-    h[4]=domain->h[4];
-    h[5]=domain->h[5];
-
-    hh[0][0]=h[0]; 
-    hh[1][1]=h[1]; 
-    hh[2][2]=h[2]; 
-    hh[1][2]=hh[2][1]=h[3]; 
-    hh[0][2]=hh[2][0]=h[4]; 
-    hh[0][1]=hh[1][0]=h[5]; 
-
-    //CM diagonalize the unit-cell
-    //dsyevv3(hh, hh_eigv, h_eig);
-
-    Matrix3d Hmat;
-    for (int i=0; i<3; i++) for (int j=0; j<3; j++) Hmat(i,j)=hh[i][j];
-    SelfAdjointEigenSolver<Matrix3d> eigensolver(Hmat);
-    if (eigensolver.info() != Success) abort();
-    for (int i=0; i<3; i++) h_eig[i]=eigensolver.eigenvalues()(i);
-    for (int i=0; i<3; i++) for (int j=0; j<3; j++) hh_eigv[i][j]=eigensolver.eigenvectors()(i,j);
-  }
+  double t_tensor_np[6];
 
   //CM
   // calculate & broadcast volume of translation mode
   //But this is only for isotropic npt!
-  if (pstyle == ISO) {
-    if (dimension == 3) volume = domain->xprd*domain->yprd*domain->zprd;
-    else volume = domain->xprd*domain->yprd;
-  }
-  else if (pstyle == TRICLINIC) {
-    volume = h_eig[0]*h_eig[1]*h_eig[2];
-    //CM print the nm mass
-    //if(universe->me==0){
-    //  printf("h, vol(tri) = (%f, %f, %f), %.4f \n", h_eig[0], h_eig[1], h_eig[2], volume);
-    //}
-  }
-
-  //broadcast volume to all 
-  //comm_exec_barostat(volume);
-
-  //CM test for mpi communications
-  //if(universe->me==0){ 
-  //  if (dimension == 3) volume = domain->xprd*domain->yprd*domain->zprd;
-  //  else volume = domain->xprd*domain->yprd;}
-  //MPI_Barrier(universe->uworld);
-  //MPI_Bcast(&volume, 1, MPI_DOUBLE, 0, universe->uworld);
-  //MPI_Barrier(universe->uworld);
-
-  //
-  //fprintf(universe->ulogfile,"volume: %f \n", volume);
-
-//  if(universe->me==0)
-//    printf("volume 0/pressure: %f, %f, %f, %f, %f \n", volume, domain->xprd, domain->yprd, domain->zprd, p_current[0]);
-
-  //if(universe->me==6)
-  //  printf("volume 6: %f \n", volume);
+  if (dimension == 3) volume = domain->xprd*domain->yprd*domain->zprd;
+  else volume = domain->xprd*domain->yprd;
 
   if (deviatoric_flag) compute_deviatoric();
 
@@ -2272,26 +2099,18 @@ void FixPIMD::nh_omega_dot()
       }
     } else {
       compute_temp_vector();
-      //CM is it right?
       double *mvv_current = t_current_vector;
-      //double *mvv_current = temperature->vector;
-      for (int i = 0; i < 3; i++)
+      MPI_Allreduce(mvv_current,t_tensor_np,6,MPI_DOUBLE,MPI_SUM,beads_comm);
+
+      for (int i = 0; i < 3; i++){
         if (p_flag[i])
           mtk_term1 += mvv_current[i];
-      mtk_term1 /= pdim * atom->natoms;
+      }
+      mtk_term1 /= pdim;
     }
   }
- 
-//  if (method_centroid == FULL){
-//    if(universe->me==0){
-//      printf("FULL\n");}
-//  }
-//  else if (method_centroid == REDUCE){
-//    if(universe->me==0){
-//      printf("REDUCE\n");}
-//  }
 
-  for (int i = 0; i < 3; i++)
+  for (int i = 0; i < 3; i++){
     if (p_flag[i]) {
       f_omega = (p_current[i]-p_hydro)*volume /
         (omega_mass[i] * nktv2p) + mtk_term1 / omega_mass[i];
@@ -2299,6 +2118,7 @@ void FixPIMD::nh_omega_dot()
       omega_dot[i] += f_omega*dthalf;
       omega_dot[i] *= pdrag_factor;
     }
+  }
 
   if (pstyle == TRICLINIC) {
     for (int i = 3; i < 6; i++) {
@@ -2313,153 +2133,23 @@ void FixPIMD::nh_omega_dot()
   }
 
   vol_current=volume;
-
-  //delete
-  for(int i = 0; i < 3; ++i){
-    delete[] hh[i];
-  }
-  delete[] hh;
-
-  for(int i = 0; i < 3; ++i){
-    delete[] hh_eigv[i];
-  }
-  delete[] hh_eigv;
-
-  delete[] h_eig;
-
 }
 
 void FixPIMD::nh_omega_dot_x()
 {
   double f_omega,volume;
   double **x = atom->x;
-  //CM position in eigenspace
-  double **xx, **hg_dot_in;
   int nlocal = atom->nlocal;
 
-  double h[6];
-  //CM eigen transformation
-  double **hh, **hh_eigv, *h_eig;
-
-  hh = new double*[3];
-  for(int i = 0; i < 3; ++i)
-      hh[i] = new double[3];
-
-  hh_eigv = new double*[3];
-  for(int i = 0; i < 3; ++i)
-      hh_eigv[i] = new double[3];
-
-  h_eig = new double[3];
-
-  //CM 
-  xx = new double*[nlocal];
-  for(int i = 0; i < nlocal; ++i)
-    xx[i] = new double[3];
-
-/* position update */
-
+  /* position update */
   //CM the position scaling update 
   //eq(3.5.1) in [2]
-  //for isotropic NPT
-  if (pstyle == ISO) {
-    for (int i = 0; i < 3; i++){
-      posexp[i]=exp(dthalf*omega_dot[i]);
-      for (int ip = 0; ip < nlocal; ip++) {
-        x[ip][i] *= posexp[i];
-      }
-    }
-  }
-
-//  if(universe->me==0)
-//    printf("eig: %f / %f / %f \n", eig[0], eig[1], eig[2]);
-
-  //for full-cell fluctuations
-  //CM is this right? The matrix is one of the whole block by mpi parallelization. 
-  else if (pstyle == TRICLINIC) {
-///    if(universe->me==0){
-///      printf("omega_dot: %e / %e / %e \n", omega_dot[0], omega_dot[1], omega_dot[2]);
-///    }
-    hg_dot[0][0]=omega_dot[0]; 
-    hg_dot[1][1]=omega_dot[1]; 
-    hg_dot[2][2]=omega_dot[2]; 
-    hg_dot[1][2]=hg_dot[2][1]=omega_dot[3]; 
-    hg_dot[0][2]=hg_dot[2][0]=omega_dot[4]; 
-    hg_dot[0][1]=hg_dot[1][0]=omega_dot[5]; 
-
-    //CM diagonalize the unit-cell momentum
-    //dsyevc3(hg, eig);
-    //for (int i=0; i<3; i++) for (int j=0; j<3; j++) hg_dot_in[i][j]=hg_dot[i][j];
-    //dsyevv3(hg_dot_in, eigv, omega_dot_eig);
-
-    //Eigen library for diagonalization
-    Matrix3d Hgdot;
-    for (int i=0; i<3; i++) for (int j=0; j<3; j++) Hgdot(i,j)=hg_dot[i][j];
-    SelfAdjointEigenSolver<Matrix3d> eigensolver(Hgdot);
-    if (eigensolver.info() != Success) abort();
-    for (int i=0; i<3; i++) omega_dot_eig[i]=eigensolver.eigenvalues()(i);
-    for (int i=0; i<3; i++) for (int j=0; j<3; j++) eigv[i][j]=eigensolver.eigenvectors()(i,j);
-
-//    if(universe->me==0){
-//     Matrix3f A;
-//     A << -4.270915e-01,-2.947423e-18,1.469828e-17,-2.947423e-18,-4.270915e-01,4.086609e-17,1.469828e-17,4.086609e-17,-4.270915e-01;
-//     std::cout << "Here is the matrix A:\n" << A << std::endl;
-//     SelfAdjointEigenSolver<Matrix3f> eigensolver(A);
-//     if (eigensolver.info() != Success) abort();
-//     std::cout << "The eigenvalues of A are:\n" << eigensolver.eigenvalues() << std::endl;
-//     std::cout << "Here's a matrix whose columns are eigenvectors of A \n"
-//          << "corresponding to these eigenvalues:\n"
-//          << eigensolver.eigenvectors() << std::endl;
-//     double eigen_eig[3];
-//     for (int i=0;i<3;i++){ 
-//       //double tmptmp=eigensolver.eigenvalues()(i);
-//       eigen_eig[i]=eigensolver.eigenvalues()(i);
-//     }
-//     //double pp = &eigen_eig[0];
-//     //VectorXd eigen_eig(3)=eigensolver.eigenvalues();
-//     //std::cout << "vectorXd" << eigen_eig << std::endl;
-//     //Eigen::Map<Matrix<double,3,RowMajor> >(pp,3) = eigensolver.eigenvalues();
-//     printf("Eigen eigenvalue: %e %e %e", eigen_eig[0], eigen_eig[1], eigen_eig[2]);
-//    }
-
-//    if(universe->me==0){
-//      printf("omega_dot_x\n");
-//
-//      printf("hg_dot: %e / %e / %e \n", hg_dot[0][0], hg_dot[0][1], hg_dot[0][2]);
-//      printf("hg_dot: %e / %e / %e \n", hg_dot[1][0], hg_dot[1][1], hg_dot[1][2]);
-//      printf("hg_dot: %e / %e / %e \n", hg_dot[2][0], hg_dot[2][1], hg_dot[2][2]);
-//
-//      printf("eig: %f / %f / %f \n", omega_dot_eig[0], omega_dot_eig[1], omega_dot_eig[2]);
-//      printf("eigv: %e / %e / %e \n", eigv[0][0], eigv[0][1], eigv[0][2]);
-//      printf("eigv: %e / %e / %e \n", eigv[1][0], eigv[1][1], eigv[1][2]);
-//      printf("eigv: %e / %e / %e \n", eigv[2][0], eigv[2][1], eigv[2][2]);
-//    }
-
-//    if(universe->me==0){
-//      printf("x: %f / %f / %f \n", x[0][0], x[0][1], x[0][2]);
-//    }
-    //CM position transformation by eigv
-    //need to use xx so as not to currupt x!!
-    //EIGV * X 
-
+  //for isotropic & PR 
+  //note that upper triangular matrices' diagonal elements are eigenvalues of itself.
+  for (int i = 0; i < 3; i++){
+    posexp[i]=exp(dthalf*omega_dot[i]);
     for (int ip = 0; ip < nlocal; ip++) {
-      xx[ip][0] = eigv[0][0]*x[ip][0]+eigv[1][0]*x[ip][1]+eigv[2][0]*x[ip][2];
-      xx[ip][1] = eigv[0][1]*x[ip][0]+eigv[1][1]*x[ip][1]+eigv[2][1]*x[ip][2];
-      xx[ip][2] = eigv[0][2]*x[ip][0]+eigv[1][2]*x[ip][1]+eigv[2][2]*x[ip][2]; 
-    }
-
-    for (int i = 0; i < 3; i++){
-      posexp[i]=exp(dthalf*omega_dot_eig[i]);
-      for (int ip = 0; ip < nlocal; ip++) {
-        xx[ip][i] *= posexp[i];
-      }
-    }
-
-    //CM position transformation by eigv
-    //EIGV^T * X 
-    for (int ip = 0; ip < nlocal; ip++) {
-      x[ip][0] = eigv[0][0]*xx[ip][0]+eigv[0][1]*xx[ip][1]+eigv[0][2]*xx[ip][2];
-      x[ip][1] = eigv[1][0]*xx[ip][0]+eigv[1][1]*xx[ip][1]+eigv[1][2]*xx[ip][2];
-      x[ip][2] = eigv[2][0]*xx[ip][0]+eigv[2][1]*xx[ip][1]+eigv[2][2]*xx[ip][2]; 
+      x[ip][i] *= posexp[i];
     }
   }
 
@@ -2467,12 +2157,7 @@ void FixPIMD::nh_omega_dot_x()
   if (mtk_flag) {
     for (int i = 0; i < 3; i++){
       if (p_flag[i]){
-        if (pstyle == ISO) {
-          mtk_term2 += omega_dot[i];
-        }
-        else if (pstyle == TRICLINIC) {
-          mtk_term2 += omega_dot_eig[i];
-        }
+        mtk_term2 += omega_dot[i];
       }
     }
     if (method_centroid==REDUCE){
@@ -2480,25 +2165,6 @@ void FixPIMD::nh_omega_dot_x()
     else if (method_centroid==FULL){
       if (pdim > 0) mtk_term2 /= pdim * atom->natoms * np;}
   }
-
-  //delete
-  for(int i = 0; i < 3; ++i){
-    delete[] hh[i];
-  }
-  delete[] hh;
-
-  for(int i = 0; i < 3; ++i){
-    delete[] hh_eigv[i];
-  }
-  delete[] hh_eigv;
-
-  delete[] h_eig;
-
-  for(int i = 0; i < nlocal; ++i){
-    delete[] xx[i];
-  }
-  delete[] xx;
-
 }
 
 /* ----------------------------------------------------------------------
@@ -2546,92 +2212,32 @@ void FixPIMD::nh_v_press()
 {
   double factor[3];
   double **v = atom->v;
-  //CM eigen transformation of v
-  double **vv;
   int *mask = atom->mask;
   int nlocal = atom->nlocal;
   if (igroup == atom->firstgroup) nlocal = atom->nfirst;
 
-  //CM 
-  vv = new double*[nlocal];
-  for(int i = 0; i < nlocal; ++i)
-    vv[i] = new double[3];
+  //CM
+  factor[0] = exp(-dt4*(omega_dot[0]+mtk_term2)); // exp[-dt4*(omega_dot+1/N*omega_dot)/W]
+  factor[1] = exp(-dt4*(omega_dot[1]+mtk_term2));
+  factor[2] = exp(-dt4*(omega_dot[2]+mtk_term2));
 
-  if (pstyle == ISO) {
-    //CM
-    factor[0] = exp(-dt4*(omega_dot[0]+mtk_term2)); // exp[-dt4*(omega_dot+1/N*omega_dot)/W]
-    factor[1] = exp(-dt4*(omega_dot[1]+mtk_term2));
-    factor[2] = exp(-dt4*(omega_dot[2]+mtk_term2));
-  
-      for (int i = 0; i < nlocal; i++) {
-        if (mask[i] & groupbit) {
-          v[i][0] *= factor[0];
-          v[i][1] *= factor[1];
-          v[i][2] *= factor[2];
-    //      if (pstyle == TRICLINIC) {
-    //        v[i][0] += -dthalf*(v[i][1]*omega_dot[5] + v[i][2]*omega_dot[4]);
-    //        v[i][1] += -dthalf*v[i][2]*omega_dot[3];
-    //      }
-          v[i][0] *= factor[0];
-          v[i][1] *= factor[1];
-          v[i][2] *= factor[2];
+    for (int i = 0; i < nlocal; i++) {
+      if (mask[i] & groupbit) {
+        v[i][0] *= factor[0];
+        v[i][1] *= factor[1];
+        v[i][2] *= factor[2];
+        if (pstyle == TRICLINIC) {
+          v[i][0] += -dthalf*(v[i][1]*omega_dot[5] + v[i][2]*omega_dot[4]);
+          v[i][1] += -dthalf*v[i][2]*omega_dot[3];
         }
+        v[i][0] *= factor[0];
+        v[i][1] *= factor[1];
+        v[i][2] *= factor[2];
       }
+    }
 
 //      if(universe->me==0)
 //        printf("bias v: %f %f %f \n", vbias[0]); 
-  }
-
-  else if (pstyle == TRICLINIC) {
-    //CM
-    factor[0] = exp(-dt4*(mtk_term2));
-    factor[1] = exp(-dt4*(mtk_term2));
-    factor[2] = exp(-dt4*(mtk_term2));
-  
-      for (int i = 0; i < nlocal; i++) {
-        if (mask[i] & groupbit) {
-          v[i][0] *= factor[0];
-          v[i][1] *= factor[1];
-          v[i][2] *= factor[2];
-
-          v[i][0] *= factor[0];
-          v[i][1] *= factor[1];
-          v[i][2] *= factor[2];
-        }
-      }
-
-    //CM velocity transformation by eigv
-    //EIGV * V
-    for (int ip = 0; ip < nlocal; ip++) {
-      vv[ip][0] = eigv[0][0]*v[ip][0]+eigv[1][0]*v[ip][1]+eigv[2][0]*v[ip][2];
-      vv[ip][1] = eigv[0][1]*v[ip][0]+eigv[1][1]*v[ip][1]+eigv[2][1]*v[ip][2];
-      vv[ip][2] = eigv[0][2]*v[ip][0]+eigv[1][2]*v[ip][1]+eigv[2][2]*v[ip][2]; 
-    }
-
-    for (int i = 0; i < 3; i++){
-      velexp[i]=exp(-dt4*omega_dot_eig[i]);
-      //velexp[i]=1.0;
-      for (int ip = 0; ip < nlocal; ip++) {
-        vv[ip][i] *= velexp[i];
-        vv[ip][i] *= velexp[i];
-      }
-    }
-
-    //CM velocity transformation by eigv
-    //EIGV^T * V 
-    for (int ip = 0; ip < nlocal; ip++) {
-      v[ip][0] = eigv[0][0]*vv[ip][0]+eigv[0][1]*vv[ip][1]+eigv[0][2]*vv[ip][2];
-      v[ip][1] = eigv[1][0]*vv[ip][0]+eigv[1][1]*vv[ip][1]+eigv[1][2]*vv[ip][2];
-      v[ip][2] = eigv[2][0]*vv[ip][0]+eigv[2][1]*vv[ip][1]+eigv[2][2]*vv[ip][2]; 
-    }
-
-  }
-
-  for(int i = 0; i < nlocal; ++i){
-    delete[] vv[i];
-  }
-  delete[] vv;
-
 }
 
 /* ----------------------------------------------------------------------
@@ -2691,38 +2297,7 @@ void FixPIMD::remap()
   double **x = atom->x;
   int *mask = atom->mask;
   int nlocal = atom->nlocal;
-// CM this causes a trouble, but why? probably memory problem. or public private.  
-//  double *h = domain->h;
-  double h[6];
-  //CM eigen transformation
-  double **hh, **h2;
-
-  h[0]=domain->h[0];
-  h[1]=domain->h[1];
-  h[2]=domain->h[2];
-  h[3]=domain->h[3];
-  h[4]=domain->h[4];
-  h[5]=domain->h[5];
-
-//  if(universe->me==0){
-//    printf("h(before): %f / %f / %f \n", h[0], h[1], h[2]);
-//    printf("h(before): %f / %f / %f \n", h[3], h[4], h[5]);
-//  }
-//
-//  if(universe->me==0){
-//    printf("eig: %f / %f / %f \n", omega_dot_eig[0], omega_dot_eig[1], omega_dot_eig[2]);
-//    printf("eigv: %f / %f / %f \n", eigv[0][0], eigv[0][1], eigv[0][2]);
-//    printf("eigv: %f / %f / %f \n", eigv[1][0], eigv[1][1], eigv[1][2]);
-//    printf("eigv: %f / %f / %f \n", eigv[2][0], eigv[2][1], eigv[2][2]);
-//  }
-
-  hh = new double*[3];
-  for(int i = 0; i < 3; ++i)
-      hh[i] = new double[3];
-
-  h2 = new double*[3];
-  for(int i = 0; i < 3; ++i)
-      h2[i] = new double[3];
+  double *h = domain->h;
 
   // omega is not used, except for book-keeping
 
@@ -2745,223 +2320,97 @@ void FixPIMD::remap()
   double dto4 = dto/4.0;
   double dto8 = dto/8.0;
 
-//  if (pstyle == TRICLINIC) {
-//    if (p_flag[4]) {
-//      expfac = exp(dto8*omega_dot[0]);
-//      htmp[4] *= expfac;
-//      htmp[4] += dto4*(omega_dot[5]*htmp[3]+omega_dot[4]*htmp[2]);
-//      htmp[4] *= expfac;
-//    }
-//
-//    if (p_flag[3]) {
-//      expfac = exp(dto4*omega_dot[1]);
-//      htmp[3] *= expfac;
-//      htmp[3] += dto2*(omega_dot[3]*htmp[2]);
-//      htmp[3] *= expfac;
-//    }
-//
-//    if (p_flag[5]) {
-//      expfac = exp(dto4*omega_dot[0]);
-//      htmp[5] *= expfac;
-//      htmp[5] += dto2*(omega_dot[5]*htmp[1]);
-//      htmp[5] *= expfac;
-//    }
-//
-//    if (p_flag[4]) {
-//      expfac = exp(dto8*omega_dot[0]);
-//      htmp[4] *= expfac;
-//      htmp[4] += dto4*(omega_dot[5]*htmp[3]+omega_dot[4]*htmp[2]);
-//      htmp[4] *= expfac;
-//    }
-//  }
-
-//  if (pstyle == TRICLINIC) {
-//
-//    if (p_flag[4]) {
-//      expfac = exp(dto8*omega_dot[0]);
-//      h[4] *= expfac;
-//      h[4] += dto4*(omega_dot[5]*h[3]+omega_dot[4]*h[2]);
-//      h[4] *= expfac;
-//    }
-//
-//    if (p_flag[3]) {
-//      expfac = exp(dto4*omega_dot[1]);
-//      h[3] *= expfac;
-//      h[3] += dto2*(omega_dot[3]*h[2]);
-//      h[3] *= expfac;
-//    }
-//
-//    if (p_flag[5]) {
-//      expfac = exp(dto4*omega_dot[0]);
-//      h[5] *= expfac;
-//      h[5] += dto2*(omega_dot[5]*h[1]);
-//      h[5] *= expfac;
-//    }
-//
-//    if (p_flag[4]) {
-//      expfac = exp(dto8*omega_dot[0]);
-//      h[4] *= expfac;
-//      h[4] += dto4*(omega_dot[5]*h[3]+omega_dot[4]*h[2]);
-//      h[4] *= expfac;
-//    }
-//  }
-
-  // scale diagonal components
-  // scale tilt factors with cell, if set
-
-  if (pstyle == ISO) {
-
-//    if(universe->me==0)
-//      printf("omega_dot: %f / %f / %f \n", omega_dot[0], omega_dot[1], omega_dot[2]);
-
-    if (p_flag[0]) {
-      oldlo = domain->boxlo[0];
-      oldhi = domain->boxhi[0];
-      expfac = exp(dto*omega_dot[0]);
-      domain->boxlo[0] = (oldlo-fixedpoint[0])*expfac + fixedpoint[0];
-      domain->boxhi[0] = (oldhi-fixedpoint[0])*expfac + fixedpoint[0];
+  if (pstyle == TRICLINIC) {
+    if (p_flag[4]) {
+      expfac = exp(dto8*omega_dot[0]);
+      h[4] *= expfac;
+      h[4] += dto4*(omega_dot[5]*h[3]+omega_dot[4]*h[2]);
+      h[4] *= expfac;
     }
-  
-    if (p_flag[1]) {
-      oldlo = domain->boxlo[1];
-      oldhi = domain->boxhi[1];
-      expfac = exp(dto*omega_dot[1]);
-      domain->boxlo[1] = (oldlo-fixedpoint[1])*expfac + fixedpoint[1];
-      domain->boxhi[1] = (oldhi-fixedpoint[1])*expfac + fixedpoint[1];
-      //if (scalexy) h[5] *= expfac;
+
+    if (p_flag[3]) {
+      expfac = exp(dto4*omega_dot[1]);
+      h[3] *= expfac;
+      h[3] += dto2*(omega_dot[3]*h[2]);
+      h[3] *= expfac;
     }
-  
-    if (p_flag[2]) {
-      oldlo = domain->boxlo[2];
-      oldhi = domain->boxhi[2];
-      expfac = exp(dto*omega_dot[2]);
-      domain->boxlo[2] = (oldlo-fixedpoint[2])*expfac + fixedpoint[2];
-      domain->boxhi[2] = (oldhi-fixedpoint[2])*expfac + fixedpoint[2];
-      //if (scalexz) h[4] *= expfac;
-      //if (scaleyz) h[3] *= expfac;
+
+    if (p_flag[5]) {
+      expfac = exp(dto4*omega_dot[0]);
+      h[5] *= expfac;
+      h[5] += dto2*(omega_dot[5]*h[1]);
+      h[5] *= expfac;
     }
+
+    if (p_flag[4]) {
+      expfac = exp(dto8*omega_dot[0]);
+      h[4] *= expfac;
+      h[4] += dto4*(omega_dot[5]*h[3]+omega_dot[4]*h[2]);
+      h[4] *= expfac;
+    }
+  }
+
+  if (p_flag[0]) {
+    oldlo = domain->boxlo[0];
+    oldhi = domain->boxhi[0];
+    expfac = exp(dto*omega_dot[0]);
+    domain->boxlo[0] = (oldlo-fixedpoint[0])*expfac + fixedpoint[0];
+    domain->boxhi[0] = (oldhi-fixedpoint[0])*expfac + fixedpoint[0];
+  }
+
+  if (p_flag[1]) {
+    oldlo = domain->boxlo[1];
+    oldhi = domain->boxhi[1];
+    expfac = exp(dto*omega_dot[1]);
+    domain->boxlo[1] = (oldlo-fixedpoint[1])*expfac + fixedpoint[1];
+    domain->boxhi[1] = (oldhi-fixedpoint[1])*expfac + fixedpoint[1];
+    //if (scalexy) h[5] *= expfac;
+  }
+
+  if (p_flag[2]) {
+    oldlo = domain->boxlo[2];
+    oldhi = domain->boxhi[2];
+    expfac = exp(dto*omega_dot[2]);
+    domain->boxlo[2] = (oldlo-fixedpoint[2])*expfac + fixedpoint[2];
+    domain->boxhi[2] = (oldhi-fixedpoint[2])*expfac + fixedpoint[2];
+    //if (scalexz) h[4] *= expfac;
+    //if (scaleyz) h[3] *= expfac;
   }
 
   if (pstyle == TRICLINIC) {
 
-    //CM diagonalize the unit-cell momentum
-    //dsyevv3(hg_dot, eigv, omega_dot_eig);
-
-    //CM unit-cell in 2D array
-    h2[0][0]=h[0]; 
-    h2[1][1]=h[1]; 
-    h2[2][2]=h[2]; 
-    h2[1][2]=h2[2][1]=h[3]; 
-    h2[0][2]=h2[2][0]=h[4]; 
-    h2[0][1]=h2[1][0]=h[5]; 
-
-    //transformation of unit-cell h
-    for(int ii=0; ii<3; ii++){
-      for(int jj=0; jj<3; jj++){
-        hh[ii][jj]=0;
-        for(int kk=0; kk<3; kk++){
-          hh[ii][jj]+=eigv[ii][kk]*h2[kk][jj];
-        }
-      }
+    if (p_flag[4]) {
+      expfac = exp(dto8*omega_dot[0]);
+      h[4] *= expfac;
+      h[4] += dto4*(omega_dot[5]*h[3]+omega_dot[4]*h[2]);
+      h[4] *= expfac;
     }
 
-    //scaling
-    for (int i = 0; i < 3; i++){
-      cellexp[i]=exp(dto*omega_dot_eig[i]);
-      for (int j = 0; j < 3; j++) {
-        hh[i][j] *= cellexp[i];
-      }
+    if (p_flag[3]) {
+      expfac = exp(dto4*omega_dot[1]);
+      h[3] *= expfac;
+      h[3] += dto2*(omega_dot[3]*h[2]);
+      h[3] *= expfac;
     }
 
-    //re-transformation of unit-cell h
-    for(int ii=0; ii<3; ii++){
-      for(int jj=0; jj<3; jj++){
-        h2[ii][jj]=0;
-        for(int kk=0; kk<3; kk++){
-          h2[ii][jj]+=eigv[kk][ii]*hh[kk][jj];
-        }
-      }
+    if (p_flag[5]) {
+      expfac = exp(dto4*omega_dot[0]);
+      h[5] *= expfac;
+      h[5] += dto2*(omega_dot[5]*h[1]);
+      h[5] *= expfac;
     }
 
-    //CM update the unit-cell info.
-    h[0]=h2[0][0]; 
-    h[1]=h2[1][1]; 
-    h[2]=h2[2][2]; 
-    h[3]=h2[1][2]; 
-    h[4]=h2[0][2]; 
-    h[5]=h2[0][1]; 
-  
-//    if(universe->me==0){
-//      printf("h(after): %f / %f / %f \n", h[0], h[1], h[2]);
-//      printf("h(after): %f / %f / %f \n", h[3], h[4], h[5]);
-//    }
-
-    if (p_flag[0]) {
-      oldlo = domain->boxlo[0];
-      oldhi = domain->boxhi[0];
-      expfac = h[0]/(oldhi-oldlo);
-      //expfac = exp(dto*omega_dot[0]);
-      domain->boxlo[0] = (oldlo-fixedpoint[0])*expfac + fixedpoint[0];
-      domain->boxhi[0] = (oldhi-fixedpoint[0])*expfac + fixedpoint[0];
-    }
-  
-    if (p_flag[1]) {
-      oldlo = domain->boxlo[1];
-      oldhi = domain->boxhi[1];
-      expfac = h[1]/(oldhi-oldlo);
-      //expfac = exp(dto*omega_dot[1]);
-      domain->boxlo[1] = (oldlo-fixedpoint[1])*expfac + fixedpoint[1];
-      domain->boxhi[1] = (oldhi-fixedpoint[1])*expfac + fixedpoint[1];
-    }
-  
-    if (p_flag[2]) {
-      oldlo = domain->boxlo[2];
-      oldhi = domain->boxhi[2];
-      expfac = h[2]/(oldhi-oldlo);
-      //expfac = exp(dto*omega_dot[0]);
-      domain->boxlo[2] = (oldlo-fixedpoint[2])*expfac + fixedpoint[2];
-      domain->boxhi[2] = (oldhi-fixedpoint[2])*expfac + fixedpoint[2];
+    if (p_flag[4]) {
+      expfac = exp(dto8*omega_dot[0]);
+      h[4] *= expfac;
+      h[4] += dto4*(omega_dot[5]*h[3]+omega_dot[4]*h[2]);
+      h[4] *= expfac;
     }
   }
 
-  // off-diagonal components, second half
-
-//  if (pstyle == TRICLINIC) {
-//
-//    if (p_flag[4]) {
-//      expfac = exp(dto8*omega_dot[0]);
-//      h[4] *= expfac;
-//      h[4] += dto4*(omega_dot[5]*h[3]+omega_dot[4]*h[2]);
-//      h[4] *= expfac;
-//    }
-//
-//    if (p_flag[3]) {
-//      expfac = exp(dto4*omega_dot[1]);
-//      h[3] *= expfac;
-//      h[3] += dto2*(omega_dot[3]*h[2]);
-//      h[3] *= expfac;
-//    }
-//
-//    if (p_flag[5]) {
-//      expfac = exp(dto4*omega_dot[0]);
-//      h[5] *= expfac;
-//      h[5] += dto2*(omega_dot[5]*h[1]);
-//      h[5] *= expfac;
-//    }
-//
-//    if (p_flag[4]) {
-//      expfac = exp(dto8*omega_dot[0]);
-//      h[4] *= expfac;
-//      h[4] += dto4*(omega_dot[5]*h[3]+omega_dot[4]*h[2]);
-//      h[4] *= expfac;
-//    }
-//
-//  }
-
-  domain->yz = h[3];//h[3];
-  domain->xz = h[4];//h[4];
-  domain->xy = h[5];//h[5];
-
+  domain->yz = h[3];
+  domain->xz = h[4];
+  domain->xy = h[5];
 
   // tilt factor to cell length ratio can not exceed TILTMAX in one step
 
@@ -2989,18 +2438,6 @@ void FixPIMD::remap()
   if (nrigid)
     for (i = 0; i < nrigid; i++)
       modify->fix[rfix[i]]->deform(1);
-
-  //delete
-  for(int i = 0; i < 3; ++i){
-    delete[] hh[i];
-  }
-  delete[] hh;
-
-  for(int i = 0; i < 3; ++i){
-    delete[] h2[i];
-  }
-  delete[] h2;
-
 
 }
 
@@ -3097,33 +2534,11 @@ void FixPIMD::nhc_press_integrate()
     }
 
   if (pstyle == TRICLINIC) {
-    hg_dot[0][0]=omega_dot[0]; 
-    hg_dot[1][1]=omega_dot[1]; 
-    hg_dot[2][2]=omega_dot[2]; 
-    hg_dot[1][2]=hg_dot[2][1]=omega_dot[3]; 
-    hg_dot[0][2]=hg_dot[2][0]=omega_dot[4]; 
-    hg_dot[0][1]=hg_dot[1][0]=omega_dot[5]; 
-
-    //CM diagonalize the unit-cell momentum
-    //dsyevv3(hg_dot, eigv, omega_dot_eig);
-    Matrix3d Hgdot;
-    for (int i=0; i<3; i++) for (int j=0; j<3; j++) Hgdot(i,j)=hg_dot[i][j];
-    SelfAdjointEigenSolver<Matrix3d> eigensolver(Hgdot);
-    if (eigensolver.info() != Success) abort();
-    for (int i=0; i<3; i++) omega_dot_eig[i]=eigensolver.eigenvalues()(i);
-    for (int i=0; i<3; i++) for (int j=0; j<3; j++) eigv[i][j]=eigensolver.eigenvectors()(i,j);
-
-    kecurrent = 0.0;
-    pdof = 0;
-    for (i = 0; i < 3; i++){
-        kecurrent += omega_mass[i]*omega_dot_eig[i]*omega_dot_eig[i];
+    for (i = 3; i < 6; i++)
+      if (p_flag[i]) {
+        kecurrent += omega_mass[i]*omega_dot[i]*omega_dot[i];
         pdof++;
-    }
-//    for (i = 3; i < 6; i++)
-//      if (p_flag[i]) {
-//        kecurrent += omega_mass[i]*omega_dot[i]*omega_dot[i];
-//        pdof++;
-//      }
+      }
   }
 
   if (pstyle == ISO) lkt_press = kt;
@@ -3382,6 +2797,7 @@ void FixPIMD::compute_temp_vector()
     t[5]+=mass[type[i]]*v[i][0]*v[i][1];
   }
 
+  //gather nlocal to natoms
   MPI_Allreduce(t,t_current_vector,6,MPI_DOUBLE,MPI_SUM,world);
 
   for (int idim=0; idim<6; idim++){
@@ -3811,9 +3227,15 @@ void FixPIMD::monitor_observable()
       if (pimdfile){
         //fprintf(pimdfile, "%d    %f    %f    %f    %f    %f    %f\n", update->ntimestep, t_current_avg, vol_current, pressure_current, E_consv, etot/boltz/atom->natoms, vir_current_avg/boltz/atom->natoms);
         //fprintf(pimdfile, "%d    %f    %f  \n", update->ntimestep, t_current_avg, vol_current);
+        //fprintf(pimdfile, "%d    %f    %f    %f    %f    %e\n", 
+        //                  update->ntimestep, t_current_avg, 
+        //                  etot/boltz/atom->natoms, petot/boltz/atom->natoms, ketot/boltz/atom->natoms, Pc_longest);
+        //fprintf(pimdfile, "%d    %f    %f    %f    %f    %e\n", 
+        //                  update->ntimestep, t_current_avg, 
+        //                  etot, petot, ketot/boltz/atom->natoms, Pc_longest);
         fprintf(pimdfile, "%d    %f    %f    %f    %f    %e\n", 
                           update->ntimestep, t_current_avg, 
-                          etot/boltz/atom->natoms, petot/boltz/atom->natoms, ketot/boltz/atom->natoms, Pc_longest);
+                          etot, petot, ketot, Pc_longest);
 //        fprintf(pimdfile, "%f    %f    %f \n", eta_E_sum, etap_E_sum, omega_E);
       }
     }
@@ -3897,9 +3319,11 @@ void FixPIMD::compute_pressure_scalar()
 }
 
 //Pressure primitive estimator
+//Note that the pressure & temperatrure follow Voigt notation.
 void FixPIMD::compute_pressure_vector_primitive()
 {
   compute_temp_vector();
+  double t_tensor_np[6];
   double *t_tensor_nm=t_current_vector;
   double *t_tensor_md=temperature->vector;
   double p_current_tensor_p[6];
@@ -3914,10 +3338,12 @@ void FixPIMD::compute_pressure_vector_primitive()
     }
   }
 
+  //Internally follows Voigt notation. At the end, we change the order of pressure notation in couple()
+  //Voigt yz xz xy
   for(int i=0; i<atom->nlocal; i++){
-    virial[3]+=fpre[i][0]*atom->x[i][1]/np;
+    virial[3]+=fpre[i][1]*atom->x[i][2]/np;
     virial[4]+=fpre[i][0]*atom->x[i][2]/np;
-    virial[5]+=fpre[i][1]*atom->x[i][2]/np;
+    virial[5]+=fpre[i][0]*atom->x[i][1]/np;
   }
 
   MPI_Allreduce(MPI_IN_PLACE,virial,6,MPI_DOUBLE,MPI_SUM,beads_comm);
@@ -3935,12 +3361,16 @@ void FixPIMD::compute_pressure_vector_primitive()
     p_current_tensor_avg[i]+=p_current_spring[i]/vol_current*force->nktv2p;
   }
 
+  //sum over beads
+  MPI_Allreduce(t_tensor_nm,t_tensor_np,6,MPI_DOUBLE,MPI_SUM,beads_comm);
   //NMkT/V term
-  for(int i=0; i<3; ++i){
-    p_current_tensor_avg[i]+=np*atom->natoms*boltz*nhc_temp/vol_current*force->nktv2p;
+  for(int i=0; i<6; ++i){
+    //p_current_tensor_avg[i]+=np*atom->natoms*boltz*nhc_temp/vol_current*force->nktv2p;
+    p_current_tensor_avg[i]+=atom->natoms*boltz*t_tensor_np[i]/vol_current*force->nktv2p;
   }
 
   // dU/dV
+  // LAMMPS stores pressure and temperatuer in xy xz yz order
   pressure->compute_vector();
   temperature->compute_scalar();
   double *p_current_tensor_ev=pressure->vector;
@@ -3970,10 +3400,13 @@ void FixPIMD::compute_pressure_vector_primitive()
 
   MPI_Allreduce(MPI_IN_PLACE,p_current_tensor_ev,6,MPI_DOUBLE,MPI_SUM,beads_comm);
 
-  for(int i=0; i<6; ++i){
+  for(int i=0; i<3; ++i){
     p_current_tensor_avg[i]+=p_current_tensor_ev[i]/(double)np;
   }
 
+  p_current_tensor_avg[3]+=p_current_tensor_ev[5]/(double)np;
+  p_current_tensor_avg[4]+=p_current_tensor_ev[4]/(double)np;
+  p_current_tensor_avg[5]+=p_current_tensor_ev[3]/(double)np;
 }
 
 //wrapper function for pimd pressure virial calculation
@@ -5451,10 +4884,85 @@ std::vector<double> FixPIMD::Evaluate_dEkn_on_atom(const int n, const int k, con
   }
 }
 
+// For Bose-Einstein condensation analysis
 void FixPIMD::observe_Pc_longest()
 {
   double beta = 1.0 / (boltz * nhc_temp);
   int n=atom->natoms;
   double degen=1./(double)(n);
-  Pc_longest=degen*exp(-beta*(Evaluate_Ekn(n,n)-V.at(n)));
+  double Eknn=Evaluate_Ekn(n,n);
+  double Vn=V.at(n);
+  Pc_longest=degen*exp(-beta*(Eknn-Vn));
+  //if(universe->iworld==0) printf("beta: %e, Ekn:  %e, V(n): %e, Pc_longest: %e \n", beta, Eknn, Vn, Pc_longest);
 } 
+
+void FixPIMD::ring_stat_v1()
+{
+  std::ofstream ringfile; 
+  std::ofstream vfile; 
+//  std::ofstream efile; 
+
+  int n=atom->natoms;
+  double logpl=0.0;
+  double beta = 1.0 / (boltz * nhc_temp);
+  for (int l=1; l<n+1; ++l) {
+    logpl=-beta*(Evaluate_Ekn(n,l)+V.at(n-l)-V.at(n));
+    P_l.at(l)=exp(logpl)/(double)(n);
+  }
+  if(universe->me==0){
+    ringfile.open ("rings.log", std::fstream::out | std::fstream::app);
+    for (std::vector<double>::const_iterator i=P_l.begin(); i!=P_l.end(); ++i){
+      ringfile << std::scientific;
+      ringfile << *i << ' ';
+    }
+    ringfile << std::endl;
+    //ringfile.close();
+  }
+  if(universe->me==0){
+    vfile.open ("v.log", std::fstream::out | std::fstream::app);
+    for (std::vector<double>::const_iterator i=V.begin(); i!=V.end(); ++i){
+      vfile << std::scientific;
+      vfile << *i << ' ';
+    }
+    vfile << std::endl;
+    //ringfile.close();
+  }
+//  if(universe->me==0){
+//    efile.open ("e.log", std::fstream::out | std::fstream::app);
+//    for (int l=1; l<n+1; ++l){
+//      efile << std::scientific;
+//      efile << Evaluate_Ekn(n,l) << ' ';
+//    }
+//    efile << std::endl;
+//    //ringfile.close();
+//  }
+}
+
+void FixPIMD::ring_stat_v2()
+{
+  std::ofstream ringfile2; 
+
+  int n=atom->natoms;
+  double prob_tot=0.0;
+  double beta = 1.0 / (boltz * nhc_temp);
+
+//  for (int l=1; l<n+1; ++l) {
+//    prob_tot+=exp(-beta*Evaluate_Ekn(n,l));
+//  }
+
+  for (int l=1; l<n+1; ++l) {
+    //P_l.at(l)=exp(-beta*Evaluate_Ekn(n,l))/prob_tot;
+    P_l.at(l)=Evaluate_Ekn(n,l);
+  }
+
+  if(universe->me==0){
+    ringfile2.open ("rings2.log", std::fstream::out | std::fstream::app);
+    for (std::vector<double>::const_iterator i=P_l.begin(); i!=P_l.end(); ++i){
+      ringfile2 << std::scientific;
+      ringfile2 << *i << ' ';
+    }
+    ringfile2 << std::endl;
+    //ringfile.close();
+  }
+}
+
