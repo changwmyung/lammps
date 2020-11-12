@@ -58,6 +58,8 @@ class FixPIMD : public Fix {
   int method_centroid;
   //CM particle symmetry
   int method_statistics;
+  int method_shuffle;
+  int freq_shuffle;
 
   /* ring-polymer model */
 
@@ -329,6 +331,15 @@ class FixPIMD : public Fix {
   void observe_Pc_longest();
   void ring_stat_v1();
   void ring_stat_v2();
+
+  //shuffle atom list
+  int *atoms_list;
+  void shuffle_atoms_list();
+  double Evaluate_Ekn_shuffle(const int n, const int k);
+  std::vector<double> Evaluate_VBn_shuffle(std::vector <double>& V, const int n);
+  std::vector<double> Evaluate_dEkn_on_atom_shuffle(const int n, const int k, const int atomnum);
+  std::vector<std::vector<double>> Evaluate_dVBn_shuffle(const std::vector<double> &V, const std::vector<double> &save_E_kn, const int n);
+  double Evaluate_ke_boson_shuffle(const std::vector<double> &V, const std::vector<double> &save_E_kn);
 
   //parallelization
   //std::vector<double> Evaluate_VBn_new(std::vector <double>& V, const int n);

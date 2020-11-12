@@ -92,6 +92,7 @@ enum{PIMD,NMPIMD,CMD};
 enum{NONE,XYZ,XY,YZ,XZ};
 enum{ISO,ANISO,TRICLINIC};
 enum{REDUCE,FULL};
+enum{NOSHUFFLE,SHUFFLE};
 enum{BOLTZMANN,BOSON,FERMION};
 
 //CM diagonalization routine
@@ -107,6 +108,7 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
   method     = PIMD;
   method_centroid = FULL;
   method_statistics = BOLTZMANN;
+  method_shuffle = NOSHUFFLE;
   fmass      = 1.0;
   nhc_temp   = 298.15;
   nhc_nchain = 4;
@@ -134,6 +136,8 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
   omega_mass_flag = 0;
   etap_mass_flag = 0;
   eta_mass_flag = 1;
+
+  atoms_list=NULL;
 
   p_current_tensor_avg=NULL;
   p_current_spring=NULL;
@@ -245,6 +249,11 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
       if(sEl<0.0) error->universe_all(FLERR,"Invalid sEl value for fix pimd. The scaling of Elongest should be positive.");
     }
 
+    else if (strcmp(arg[i],"shuffle") == 0){
+      method_shuffle=SHUFFLE;
+      freq_shuffle = force->numeric(FLERR,arg[i+1]);
+    }
+
     //else error->universe_all(arg[i],i+1,"Unkown keyword for fix pimd");
   }
 
@@ -328,6 +337,11 @@ FixPIMD::FixPIMD(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
   memory->grow(fpre, atom->natoms, 3, "FixPIMD::fpre");
   memory->grow(xc,   atom->natoms, 3, "FixPIMD::xc");
   memory->grow(fc,   atom->natoms, 3, "FixPIMD::fc");
+  
+  //shuffle atom
+  memory->grow(atoms_list, atom->natoms, "FixPIMD::atoms_list");
+  //assign normal ordering
+  for(int i=0; i<atom->nlocal; i++) atoms_list[i]=i;
 
   //allocating memory for array
   //eta = new double[max][mtchain];
@@ -740,6 +754,8 @@ void FixPIMD::init()
     if(universe->me==0) fprintf(pimdfile, " - Nuclei follow 1. distinguishable BOLTZMANN statistics (default).\n");
   if(method_statistics==BOSON)
     if(universe->me==0) fprintf(pimdfile, " - Nuclei follow 2. indistinguishable BOSON statistics (check if your nuclei are boson!).\n");
+  if(method_shuffle==SHUFFLE)
+    if(universe->me==0) fprintf(pimdfile, " - Recursive summation will shuffle atoms order at every %d steps\n", freq_shuffle);
   if(universe->me==0) fprintf(pimdfile, "*****************************************************************************************************\n");
 
   if (pstat_flag && mpchain){
@@ -1576,12 +1592,42 @@ void FixPIMD::spring_force()
   else if(method_statistics==BOSON){ 
     V.at(0) = 0.0;
 
+//  check shuffle
+//    if(universe->me==0){ 
+//      for(int i=0;i<atom->nlocal;++i){ 
+//        if(i==atom->nlocal-1){
+//          fprintf(pimdfile, "%d \n", atoms_list[i]);}
+//        else{
+//          fprintf(pimdfile, "%d ", atoms_list[i]);}
+//      }
+//    }
+    
+    //shuffle method
+    if(method_shuffle==SHUFFLE){ 
+       if(update->ntimestep%freq_shuffle==0 && update->ntimestep!=0){ 
+         shuffle_atoms_list();}
+    }
+
+//    //Original ver.
+//    //energy
+//    E_kn = Evaluate_VBn(V, atom->natoms);
+//    //if(universe->me==0) for (int i=0; i<atom->natoms*(atom->natoms+1)/2; i++) printf("(org) %d %e\n", i, E_kn.at(i));
+//    //force
+//    dV = Evaluate_dVBn(V,E_kn,atom->natoms);
+//    ke_boson_vir=Evaluate_ke_boson(V, E_kn);
+//    //Prob. of the longest polymer  
+//    observe_Pc_longest();
+//    if(update->ntimestep%output->thermo_every==0){
+//      ring_stat_v1();
+//      ring_stat_v2();
+//    }
+
+    //Shuffle ver.
     //energy
-    E_kn = Evaluate_VBn(V, atom->natoms);
-    //if(universe->me==0) for (int i=0; i<atom->natoms*(atom->natoms+1)/2; i++) printf("(org) %d %e\n", i, E_kn.at(i));
+    E_kn = Evaluate_VBn_shuffle(V, atom->natoms);
     //force
-    dV = Evaluate_dVBn(V,E_kn,atom->natoms);
-    ke_boson_vir=Evaluate_ke_boson(V, E_kn);
+    dV = Evaluate_dVBn_shuffle(V,E_kn,atom->natoms);
+    ke_boson_vir=Evaluate_ke_boson_shuffle(V, E_kn);
     //Prob. of the longest polymer  
     observe_Pc_longest();
     if(update->ntimestep%output->thermo_every==0){
@@ -4153,7 +4199,51 @@ double FixPIMD::Evaluate_ke_boson(const std::vector<double> &V, const std::vecto
   return ke_boson.at(n);
 }
 
-//std::vector<double> FixPIMD::Evaluate_VBn_new(std::vector <double>& V, const int n)
+double FixPIMD::Evaluate_ke_boson_shuffle(const std::vector<double> &V, const std::vector<double> &save_E_kn)
+{
+  int n=atom->natoms;
+  double numerator;
+  double beta   = 1.0 / (boltz * nhc_temp);
+  double Emax;
+  int beta_n; //partitioning beta for the low temp. limit
+  int beta_grid=100; //beta grid
+
+  //bosonic kinetic energy
+  std::vector<double> ke_boson(n+1, 0.0);
+
+  int count = 0;
+  for (int m = 1; m < n+1; ++m) {
+    numerator=0.0;
+    Emax=std::min((Evaluate_Ekn_shuffle(m,1)+V.at(m-1)), (Evaluate_Ekn_shuffle(m,m)+V.at(0)));
+    for (int k = m; k > 0; --k) {
+      numerator += (ke_boson.at(m-k)-save_E_kn.at(count))*exp(-beta*(save_E_kn.at(count) + V.at(m-k) - Emax));
+      if(std::isnan(numerator) || std::isinf(numerator)) {
+        if (universe->me ==0){
+          printf("E_kn(%d,%d): %e, numerator: %e \n", m, k, save_E_kn.at(count), numerator);}
+      }
+      count++;
+    }
+    beta_n=(int)(abs(beta*(V.at(m) - Emax)))/beta_grid+1;
+    double sig_denom_m = exp(-beta*(V.at(m) - Emax)/(double)beta_n);
+
+    if(sig_denom_m ==0 || std::isnan(sig_denom_m) || std::isinf(sig_denom_m) || std::isnan(numerator) || std::isinf(numerator)) {
+      if (universe->iworld ==0){
+        std::cout << "m is: "<< m << " V.at(m) is " <<V.at(m)<< " beta is: " << beta << " sig_denom_m is: " <<sig_denom_m << std::endl;
+      }
+      exit(0);
+    }
+
+    for(int ib=0; ib<beta_n; ib++){
+      if(ib==0){
+        ke_boson.at(m) = numerator/sig_denom_m/(double)m;}
+      else{
+        ke_boson.at(m) /= sig_denom_m;
+      }
+    }
+  }
+  return ke_boson.at(n);
+}
+
 std::vector<double> FixPIMD::Evaluate_VBn_new(std::vector <double>& V, const int n)
 {
   int ngroups;
@@ -4315,6 +4405,7 @@ std::vector<double> FixPIMD::Evaluate_VBn(std::vector <double>& V, const int n)
     //for (int k = 1; k <m+1; ++k) {
     for (int k = m; k > 0; --k) {
       Ekn = Evaluate_Ekn(m,k);
+      //Ekn = Evaluate_Ekn(m,k);
       save_E_kn.at(count) = Ekn;
       //if (universe->me ==0)  printf("(origianl) Ekn(%d,%d)=%e \n",m,k,Ekn);
 //      if(k==1){
@@ -4354,6 +4445,42 @@ std::vector<double> FixPIMD::Evaluate_VBn(std::vector <double>& V, const int n)
   }
   return save_E_kn;
 }
+
+std::vector<double> FixPIMD::Evaluate_VBn_shuffle(std::vector <double>& V, const int n)
+{
+  double sig_denom;
+  double Elongest;
+  double Ekn;
+  double beta   = 1.0 / (boltz * nhc_temp);
+  std::vector<double> save_E_kn(n*(n+1)/2, 0.0);
+
+  int count = 0;
+  for (int m = 1; m < n+1; ++m) {
+    sig_denom = 0.0;
+    Elongest = std::min((Evaluate_Ekn_shuffle(m,1)+V.at(m-1)), (Evaluate_Ekn_shuffle(m,m)+V.at(0)));
+    for (int k = m; k > 0; --k) {
+      Ekn = Evaluate_Ekn_shuffle(m,k);
+      save_E_kn.at(count) = Ekn;
+      sig_denom += exp(-beta*(Ekn + V.at(m-k)-Elongest));
+
+      if(std::isnan(sig_denom) || std::isinf(sig_denom)) {
+        if (universe->me ==0){
+          printf("E_kn(%d,%d): %e, V.at(m-k):%e, Elongest: %e, sig_denom: %e \n", m, k, Ekn, V.at(m-k), Elongest, sig_denom);}
+      }
+      count++;
+    }
+    V.at(m) = Elongest-1.0/beta*log(sig_denom / (double)m);
+
+    if(std::isinf(V.at(m)) || std::isnan(V.at(m))) {
+	if (universe->me ==0){
+          std::cout << "sig_denom is: " << sig_denom << " Elongest is: " << Elongest
+                    << std::endl;}
+          exit(0);
+    }
+  }
+  return save_E_kn;
+}
+
 
 double FixPIMD::Evaluate_Ekn_new(const int n, const int k)
 {
@@ -4540,6 +4667,62 @@ double FixPIMD::Evaluate_Ekn(const int n, const int k)
   return energy_local;
 }
 
+double FixPIMD::Evaluate_Ekn_shuffle(const int n, const int k)
+{
+  int bead = universe->iworld;
+
+  double **x = atom->x;
+  double* _mass = atom->mass;
+  int* type = atom->type;
+  int nlocal = atom->nlocal;
+  double* xnext = buf_beads[x_next];
+  double omega_sq = omega_np*omega_np;
+  double delx=0.0;
+  double dely=0.0;
+  double delz=0.0;
+
+  //needs to modify
+  //xnext += 3*(n-k);
+  //if(bead == np-1 && k > 1) xnext += 3;
+
+  spring_energy = 0.0;
+  for (int i = n-k; i < n ; ++i) {
+    if(bead==np-1 && k>1 && i<n-1){
+      delx =x[atoms_list[i]][0] - xnext[3*atoms_list[i+1]+0]; 
+      dely =x[atoms_list[i]][1] - xnext[3*atoms_list[i+1]+1]; 
+      delz =x[atoms_list[i]][2] - xnext[3*atoms_list[i+1]+2]; 
+    }
+    else if(bead==np-1 && i==n-1){
+      delx =x[atoms_list[i]][0] - xnext[3*atoms_list[n-k]+0]; 
+      dely =x[atoms_list[i]][1] - xnext[3*atoms_list[n-k]+1]; 
+      delz =x[atoms_list[i]][2] - xnext[3*atoms_list[n-k]+2]; 
+    }
+    else{
+      delx =x[atoms_list[i]][0] - xnext[3*atoms_list[i]+0]; 
+      dely =x[atoms_list[i]][1] - xnext[3*atoms_list[i]+1]; 
+      delz =x[atoms_list[i]][2] - xnext[3*atoms_list[i]+2]; 
+    }
+
+    domain->minimum_image(delx, dely, delz);
+
+//    if (bead == np - 1 && i == n - 2) {
+//      xnext = buf_beads[x_next];
+//      xnext += 3*(n - k);
+//    } else xnext += 3;
+    spring_energy += 0.5*_mass[type[i]]*omega_sq*(delx*delx + dely*dely + delz*delz);
+  }
+
+  double energy_all = 0.0;
+  double energy_local = spring_energy;
+  MPI_Allreduce(MPI_IN_PLACE,&energy_local,1,MPI_DOUBLE,MPI_SUM,universe->uworld);
+  if(std::isnan(spring_energy) || std::isnan(energy_all)){
+    std::cout<< universe->iworld << " " << spring_energy <<" " << energy_all <<std::endl;
+    exit(0);}
+
+  return energy_local;
+}
+
+
 std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn_new(const std::vector<double> &V, const std::vector<double> &save_E_kn, const int n) 
 {
   double beta = 1.0 / (boltz * nhc_temp);
@@ -4634,7 +4817,6 @@ std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn_new(const std::vector<dou
   }
   return dV_all;
 }
-
 
 std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn(const std::vector<double> &V, const std::vector<double> &save_E_kn, const int n) 
 {
@@ -4739,6 +4921,85 @@ std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn(const std::vector<double>
     /*if(bead==0)
         std::cout <<"atom: " << atomnum+1 <<" bead: "<< bead+1 << " fafter: " << f[atomnum][0]<<" "<< f[atomnum][1]<< " "<<f[atomnum][2] <<std::endl;
       */
+  }
+  return dV_all;
+}
+
+std::vector<std::vector<double>>FixPIMD::Evaluate_dVBn_shuffle(const std::vector<double> &V, const std::vector<double> &save_E_kn, const int n) 
+{
+  double beta = 1.0 / (boltz * nhc_temp);
+  int bead = universe->iworld;
+  double **f = atom->f;
+  int nlocal = atom->nlocal;
+  double sig_denom_m;
+
+  int beta_n; //partitioning beta for the low temp. limit
+  int beta_grid=100; //beta grid
+
+  std::vector<std::vector<double>> dV_all(n, std::vector<double>(3,0.0));
+
+  for (int atomnum = 0; atomnum < nlocal; ++atomnum) {
+    std::vector<std::vector<double>> dV(n+1, std::vector<double>(3,0.0));
+    dV.at(0) = {0.0,0.0,0.0};
+
+    for (int m = 1; m < n + 1; ++m) {
+      std::vector<double> sig(3,0.0);
+
+      if (atomnum > m-1) {
+        dV.at(m) = {0.0,0.0,0.0};
+      }else{
+        int count = m*(m-1)/2;
+        double Emax=std::min((Evaluate_Ekn(m,1)+V.at(m-1)), (Evaluate_Ekn(m,m)+V.at(0)));
+        for (int k = m; k > 0; --k) {
+          std::vector<double> dE_kn(3,0.0);
+          dE_kn = Evaluate_dEkn_on_atom_shuffle(m,k,atomnum);
+
+          sig.at(0) += (dE_kn.at(0) + dV.at(m - k).at(0))*exp(-beta*(save_E_kn.at(count) + V.at(m - k) - Emax));
+          sig.at(1) += (dE_kn.at(1) + dV.at(m - k).at(1))*exp(-beta*(save_E_kn.at(count) + V.at(m - k) - Emax));
+          sig.at(2) += (dE_kn.at(2) + dV.at(m - k).at(2))*exp(-beta*(save_E_kn.at(count) + V.at(m - k) - Emax));
+
+          count++;
+        }
+
+        beta_n=(int)(abs(beta*(V.at(m)-Emax)))/beta_grid+1;
+
+        sig_denom_m = exp(-beta*(V.at(m)-Emax)/(double)beta_n);
+
+        if(sig_denom_m ==0 || std::isnan(sig_denom_m) || std::isinf(sig_denom_m) || std::isnan(sig.at(0)) || std::isinf(sig.at(0))) {
+          if (universe->iworld ==0){
+            std::cout << "m is: "<< m << " Emax is: " << Emax << " V.at(m-1) is " <<V.at(m-1)<< " beta is: " << beta << " sig_denom_m is: " <<sig_denom_m << std::endl;
+          }
+          exit(0);
+        }
+
+        for(int ib=0; ib<beta_n; ib++){
+          if(ib==0){
+            dV.at(m).at(0) = sig.at(0)/sig_denom_m/(double)m;
+            dV.at(m).at(1) = sig.at(1)/sig_denom_m/(double)m;
+            dV.at(m).at(2) = sig.at(2)/sig_denom_m/(double)m;}
+          else{
+            dV.at(m).at(0) /= sig_denom_m;
+            dV.at(m).at(1) /= sig_denom_m;
+            dV.at(m).at(2) /= sig_denom_m;
+          }
+        }
+
+        if(std::isinf(dV.at(m).at(0)) || std::isnan(dV.at(m).at(0))) {
+          if (universe->iworld ==0){
+            std::cout << " Elongest is: " << Emax
+                      << " V.at(m) is " << V.at(m) << " beta is " << beta << std::endl;}
+          exit(0);
+        }
+      }
+    }
+
+    dV_all.at((atoms_list[atomnum])).at(0) = dV.at(n).at(0);
+    dV_all.at((atoms_list[atomnum])).at(1) = dV.at(n).at(1);
+    dV_all.at((atoms_list[atomnum])).at(2) = dV.at(n).at(2);
+
+    f[atoms_list[atomnum]][0] -= dV.at(n).at(0);
+    f[atoms_list[atomnum]][1] -= dV.at(n).at(1);
+    f[atoms_list[atomnum]][2] -= dV.at(n).at(2);
   }
   return dV_all;
 }
@@ -4884,13 +5145,93 @@ std::vector<double> FixPIMD::Evaluate_dEkn_on_atom(const int n, const int k, con
   }
 }
 
+//shuffle version
+std::vector<double> FixPIMD::Evaluate_dEkn_on_atom_shuffle(const int n, const int k, const int atomnum)
+{
+  int bead = universe->iworld;
+  double **x = atom->x;
+  double *_mass = atom->mass;
+  int *type = atom->type;
+  int nlocal = atom->nlocal;
+  double *xnext = buf_beads[x_next];
+  double *xlast = buf_beads[x_last];
+  double omega_sq = omega_np * omega_np;
+
+  double delx1=0.0;
+  double dely1=0.0;
+  double delz1=0.0;
+  double delx2=0.0;
+  double dely2=0.0;
+  double delz2=0.0;
+  double dx=0.0;
+  double dy=0.0;
+  double dz=0.0;
+
+  //atomnum is the index of atoms_list array!
+  if (atomnum < n-k or atomnum > n-1 ){ 
+    return std::vector<double>(3, 0.0);}
+  else {
+    std::vector<double> res(3);
+
+    if(bead==np-1 && k>1 && atomnum!=n-1){
+      delx1 = xnext[3*atoms_list[atomnum+1]+0] - x[atoms_list[atomnum]][0];
+      dely1 = xnext[3*atoms_list[atomnum+1]+1] - x[atoms_list[atomnum]][1];
+      delz1 = xnext[3*atoms_list[atomnum+1]+2] - x[atoms_list[atomnum]][2];
+    }
+    else if(bead==np-1 && k>1 && atomnum==n-1){
+      delx1 = xnext[3*atoms_list[n-k]+0] - x[atoms_list[atomnum]][0];
+      dely1 = xnext[3*atoms_list[n-k]+1] - x[atoms_list[atomnum]][1];
+      delz1 = xnext[3*atoms_list[n-k]+2] - x[atoms_list[atomnum]][2];
+    }
+    else{
+      delx1 = xnext[3*atoms_list[atomnum]+0] - x[atoms_list[atomnum]][0];
+      dely1 = xnext[3*atoms_list[atomnum]+1] - x[atoms_list[atomnum]][1];
+      delz1 = xnext[3*atoms_list[atomnum]+2] - x[atoms_list[atomnum]][2];
+    }
+    domain->minimum_image(delx1, dely1, delz1);
+
+    if(bead==0 && k>1 && atomnum!=n-k){
+      delx2 = xlast[3*atoms_list[atomnum-1]+0] - x[atoms_list[atomnum]][0];
+      dely2 = xlast[3*atoms_list[atomnum-1]+1] - x[atoms_list[atomnum]][1];
+      delz2 = xlast[3*atoms_list[atomnum-1]+2] - x[atoms_list[atomnum]][2];
+    }
+    else if(bead==0 && k>1 && atomnum==n-k){
+      delx2 = xlast[3*atoms_list[n-1]+0] - x[atoms_list[atomnum]][0];
+      dely2 = xlast[3*atoms_list[n-1]+1] - x[atoms_list[atomnum]][1];
+      delz2 = xlast[3*atoms_list[n-1]+2] - x[atoms_list[atomnum]][2];
+    }
+    else{
+      delx2 = xlast[3*atoms_list[atomnum]+0] - x[atoms_list[atomnum]][0];
+      dely2 = xlast[3*atoms_list[atomnum]+1] - x[atoms_list[atomnum]][1];
+      delz2 = xlast[3*atoms_list[atomnum]+2] - x[atoms_list[atomnum]][2];
+    }
+    domain->minimum_image(delx2, dely2, delz2);
+
+    double dx = -1.0*(delx1 + delx2);
+    double dy = -1.0*(dely1 + dely2);
+    double dz = -1.0*(delz1 + delz2);
+
+    res.at(0) = _mass[type[atoms_list[atomnum]]] * omega_sq * dx;
+    res.at(1) = _mass[type[atoms_list[atomnum]]] * omega_sq * dy;
+    res.at(2) = _mass[type[atoms_list[atomnum]]] * omega_sq * dz;
+
+    return res;
+  }
+}
+
+void FixPIMD::shuffle_atoms_list()
+{
+  int n=atom->nlocal;
+  std::random_shuffle(&atoms_list[0], &atoms_list[n]);
+}
+
 // For Bose-Einstein condensation analysis
 void FixPIMD::observe_Pc_longest()
 {
   double beta = 1.0 / (boltz * nhc_temp);
   int n=atom->natoms;
   double degen=1./(double)(n);
-  double Eknn=Evaluate_Ekn(n,n);
+  double Eknn=Evaluate_Ekn_shuffle(n,n);
   double Vn=V.at(n);
   Pc_longest=degen*exp(-beta*(Eknn-Vn));
   //if(universe->iworld==0) printf("beta: %e, Ekn:  %e, V(n): %e, Pc_longest: %e \n", beta, Eknn, Vn, Pc_longest);
@@ -4906,7 +5247,7 @@ void FixPIMD::ring_stat_v1()
   double logpl=0.0;
   double beta = 1.0 / (boltz * nhc_temp);
   for (int l=1; l<n+1; ++l) {
-    logpl=-beta*(Evaluate_Ekn(n,l)+V.at(n-l)-V.at(n));
+    logpl=-beta*(Evaluate_Ekn_shuffle(n,l)+V.at(n-l)-V.at(n));
     P_l.at(l)=exp(logpl)/(double)(n);
   }
   if(universe->me==0){
@@ -4952,7 +5293,7 @@ void FixPIMD::ring_stat_v2()
 
   for (int l=1; l<n+1; ++l) {
     //P_l.at(l)=exp(-beta*Evaluate_Ekn(n,l))/prob_tot;
-    P_l.at(l)=Evaluate_Ekn(n,l);
+    P_l.at(l)=Evaluate_Ekn_shuffle(n,l);
   }
 
   if(universe->me==0){
